@@ -4,14 +4,15 @@ import hashlib
 
 import pytest
 
-from study import Participant
+from study import BATCH_SIZE, Participant
 from test_study import synthetic_pool
 from tools.merge_drive_csv import REQUIRED_COLUMNS, merge_batches
 
 
-def rows_for_batch(person, pool):
+def rows_for_batch(person, pool, size=BATCH_SIZE):
     person.start_batch(pool)
-    for index in range(10):
+    person.batch.comparisons = person.batch.comparisons[:size]
+    for index in range(len(person.batch.comparisons)):
         person.batch.index = index
         person.answer("left")
     payload = person.prepare_submission("d" * 64)
@@ -40,8 +41,8 @@ def test_merge_preserves_unicode_and_removes_identical_download_copies(tmp_path)
         write_batch(path, rows)
     columns, combined = merge_batches(paths)
     assert set(columns) == REQUIRED_COLUMNS
-    assert len(combined) == 20
-    assert [int(row["comparison_number"]) for row in combined] == list(range(1, 21))
+    assert len(combined) == 30
+    assert [int(row["comparison_number"]) for row in combined] == list(range(1, 31))
     assert combined[0]["prompt"] == first[0]["prompt"]
 
 
@@ -58,6 +59,26 @@ def test_merge_rejects_conflicting_downloads(tmp_path):
 
 def test_merge_rejects_incomplete_batches(tmp_path):
     path = tmp_path / "partial.csv"
-    write_batch(path, rows_for_batch(Participant(), synthetic_pool())[:9])
-    with pytest.raises(ValueError, match="10 complete"):
+    write_batch(path, rows_for_batch(Participant(), synthetic_pool())[:14])
+    with pytest.raises(ValueError, match="15 complete"):
         merge_batches([path])
+
+
+def test_merge_rejects_incorrect_resolution_order(tmp_path):
+    rows = rows_for_batch(Participant(), synthetic_pool())
+    rows[0]["target_resolution"] = 64
+    path = tmp_path / "wrong_resolution.csv"
+    write_batch(path, rows)
+    with pytest.raises(ValueError, match="numbering"):
+        merge_batches([path])
+
+
+def test_merge_preserves_old_ten_vote_batches_alongside_new_fifteen_vote_batches(tmp_path):
+    person = Participant()
+    old = rows_for_batch(person, synthetic_pool(), size=10)
+    new = rows_for_batch(person, synthetic_pool())
+    paths = [tmp_path / "old.csv", tmp_path / "new.csv"]
+    for path, rows in zip(paths, (old, new)):
+        write_batch(path, rows)
+    _, combined = merge_batches(paths)
+    assert [int(row["comparison_number"]) for row in combined] == list(range(1, 26))

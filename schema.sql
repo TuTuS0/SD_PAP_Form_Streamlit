@@ -1,4 +1,4 @@
--- Run once in the Supabase SQL editor. No extension or paid service is required.
+-- Run in the Supabase SQL editor, also to upgrade an existing 10-vote study.
 -- Streamlit calls the RPC with a server-only secret key (service_role).
 begin;
 
@@ -20,7 +20,7 @@ create table if not exists public.pixel_votes (
     batch_id uuid not null,
     batch_number integer not null,
     comparison_number integer not null check (comparison_number > 0),
-    batch_comparison_number integer not null check (batch_comparison_number between 1 and 10),
+    batch_comparison_number integer not null check (batch_comparison_number between 1 and 15),
     dataset_version text not null check (length(dataset_version) = 64),
     sampler_version text not null,
     sampling_seed text not null,
@@ -48,12 +48,22 @@ create table if not exists public.pixel_votes (
         references public.pixel_batches (batch_id, participant_id, batch_number),
     unique (participant_id, comparison_number),
     unique (batch_id, comparison_id),
-    check (comparison_number = (batch_number - 1) * 10 + batch_comparison_number),
+    check (comparison_number >= batch_comparison_number),
     check ((left_method = 'SDPAP') <> (right_method = 'SDPAP')),
     check (winner = case selected_side when 'left' then left_method when 'right' then right_method else 'tie' end),
     check ((is_repeat and pool_cycle > 1 and repeat_reason = 'pool_exhausted')
         or (not is_repeat and pool_cycle = 1 and repeat_reason = ''))
 );
+
+-- Preserve stored 10-vote batches while permitting new 15-vote submissions.
+-- Cumulative numbering is now checked inside the serialized RPC, so a participant
+-- can finish a legacy batch and continue under the new protocol.
+alter table public.pixel_votes drop constraint if exists pixel_votes_batch_comparison_number_check;
+alter table public.pixel_votes add constraint pixel_votes_batch_comparison_number_check
+    check (batch_comparison_number between 1 and 15);
+alter table public.pixel_votes drop constraint if exists pixel_votes_check;
+alter table public.pixel_votes add constraint pixel_votes_check
+    check (comparison_number >= batch_comparison_number);
 
 create index if not exists pixel_votes_participant_pair_idx
     on public.pixel_votes (participant_id, comparison_id);
@@ -77,6 +87,8 @@ declare
     v_payload jsonb := jsonb_build_object('p_batch', p_batch, 'p_votes', p_votes);
     v_existing jsonb;
     v_next integer;
+    v_offset integer;
+    v_size integer := case when p_batch->>'sampler_version' = 'balanced-reference-resolution-cycle-v3' then 15 else 10 end;
     v_vote jsonb;
     v_position bigint;
     v_was_seen boolean;
@@ -85,9 +97,10 @@ begin
        or jsonb_typeof(p_votes) is distinct from 'array' then
         raise exception 'Invalid batch payload';
     end if;
-    if jsonb_array_length(p_votes) <> 10 or v_batch_id is null
+    if jsonb_array_length(p_votes) <> v_size or v_batch_id is null
+       or (p_batch ? 'batch_size' and (p_batch->>'batch_size')::integer is distinct from v_size)
        or v_participant_id is null or v_batch_number is null or v_batch_number < 1 then
-        raise exception 'A batch must contain exactly 10 votes and valid identifiers';
+        raise exception 'A batch must contain every vote required by its protocol and valid identifiers';
     end if;
 
     -- Serialize submissions for one anonymous participant. Different participants
@@ -106,6 +119,8 @@ begin
     if v_next <> v_batch_number then
         raise exception 'Batch number is not the next submission for this participant';
     end if;
+    select coalesce(max(comparison_number), 0) into v_offset
+        from public.pixel_votes where participant_id = v_participant_id;
 
     insert into public.pixel_batches
         (batch_id, participant_id, batch_number, dataset_version, sampler_version, sampling_seed, submission)
@@ -119,8 +134,14 @@ begin
            or (v_vote->>'batch_id')::uuid is distinct from v_batch_id
            or (v_vote->>'batch_number')::integer is distinct from v_batch_number
            or (v_vote->>'batch_comparison_number')::bigint is distinct from v_position
-           or (v_vote->>'comparison_number')::bigint is distinct from ((v_batch_number - 1)::bigint * 10 + v_position) then
+           or (v_vote->>'comparison_number')::bigint is distinct from (v_offset::bigint + v_position) then
             raise exception 'Vote identifiers or numbering do not match the batch';
+        end if;
+        if v_size = 15 and (
+            (v_vote->>'target_resolution')::integer is distinct from
+                (case (v_position - 1) % 3 when 0 then 48 when 1 then 64 else 128 end)
+            or v_vote->>'selected_side' not in ('left', 'right')) then
+            raise exception 'New batches require 48, 64, 128 in order and a winning image';
         end if;
         select exists (select 1 from public.pixel_votes
             where participant_id = v_participant_id and comparison_id = v_vote->>'comparison_id')

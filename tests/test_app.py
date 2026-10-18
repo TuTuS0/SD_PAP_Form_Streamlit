@@ -2,42 +2,37 @@ from pathlib import Path
 import re
 import hashlib
 import json
-import time
+from types import SimpleNamespace
 
+import pytest
 import requests
 
 from streamlit.testing.v1 import AppTest
 
 from storage import PreviewStore, StorageError
+from study import BATCH_SIZE
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def app(monkeypatch):
+def app(monkeypatch, language="fr"):
     monkeypatch.setenv("PIXEL_STUDY_PREVIEW", "1")
     result = AppTest.from_file(str(ROOT / "app.py"), default_timeout=20).run()
     assert not result.exception
+    if language != "fr":
+        result.radio(key="language_choice").set_value(language).run()
+        assert not result.exception
     result.button(key="start").click().run()
     assert not result.exception
     return result
 
 
-def finish_batch(at, choice="Left image", unlock=True):
-    for _ in range(10):
+def finish_batch(at, choice="Left image"):
+    for _ in range(BATCH_SIZE):
         assert not at.radio
         assert not any(button.key == "next" for button in at.button)
         vote_button(at, choice).click().run()
         assert not at.exception
-    if unlock and at.session_state.person.phase == "milestone":
-        unlock_milestone(at)
-    return at
-
-
-def unlock_milestone(at):
-    # Advance only the stored UI deadline, without sleeping or changing votes.
-    at.session_state.person.celebration_ready_at = time.monotonic() - 1
-    at.run()
-    assert not at.exception
     return at
 
 
@@ -53,20 +48,29 @@ def test_three_batches_progress_achievements_and_finish(monkeypatch):
         finish_batch(at)
         person = at.session_state.person
         assert person.phase == "milestone"
-        assert person.completed == number * 10
+        assert person.completed == number * BATCH_SIZE
         assert person.participant_id == participant_id
         assert len(at.session_state.store.submissions) == number
         visible = " ".join(item.value for item in at.markdown)
         assert f"Lot {number} terminé" in visible
         assert "Pixel Explorer" in visible
-        if number == 3:
+        if number == 2:
             assert "Pixel Enthusiast" in visible and "Nouveau" in visible
         if number < 3:
             at.button(key="continue").click().run()
+        assert not at.get("bidi_component")  # Sharing is only offered after Finish.
     at.button(key="finish").click().run()
     assert not at.exception
     assert at.session_state.person.phase == "finished"
-    assert at.session_state.person.completed == 30
+    assert at.session_state.person.completed == 45
+    shared = json.loads(at.get("bidi_component")[0].proto.json)
+    assert "J’ai évalué 45 paires de pixel arts" in shared["text"]
+    assert "compare 15 paires d’images" in shared["text"]
+    assert shared["share_label"] == "Partager mon score"
+    assert participant_id not in json.dumps(shared)
+    assert not any(method in shared["text"] for method in ("SDPAP", "GPTImage", "MYOS", "APIP"))
+    at.run()
+    assert len(at.session_state.store.submissions) == 3
 
 
 def test_back_preserves_and_can_change_previous_vote(monkeypatch):
@@ -99,8 +103,9 @@ def test_live_mode_cannot_start_without_persistent_storage(monkeypatch):
     assert "store" not in at.session_state
 
 
-def test_uncertain_save_retains_votes_and_retry_does_not_duplicate(monkeypatch):
-    at = app(monkeypatch)
+@pytest.mark.parametrize("language", ["fr", "en"])
+def test_uncertain_save_retains_votes_and_retry_does_not_duplicate(monkeypatch, language):
+    at = app(monkeypatch, language)
 
     class UncertainStore(PreviewStore):
         failed = False
@@ -116,14 +121,24 @@ def test_uncertain_save_retains_votes_and_retry_does_not_duplicate(monkeypatch):
     finish_batch(at)
     assert at.session_state.person.phase == "submitting"
     assert at.session_state.person.completed == 0
-    assert len(at.session_state.person.batch.answers) == 10
+    assert len(at.session_state.person.batch.answers) == BATCH_SIZE
+    assert not at.get("balloons")
+    assert not any(button.key in {"continue", "finish"} for button in at.button)
+    if language == "en":
+        visible = " ".join(item.value for item in at.markdown)
+        assert "Connection interrupted" in visible
+        assert "Your 15 choices are kept in this session." in visible
+        assert at.button(key="retry").label == "Try again"
     batch_id = at.session_state.person.batch.batch_id
     at.button(key="retry").click().run()
     assert not at.exception
     assert at.session_state.person.phase == "milestone"
-    assert at.session_state.person.completed == 10
+    assert at.session_state.person.completed == BATCH_SIZE
     assert at.session_state.person.batch.batch_id == batch_id
     assert len(at.session_state.store.submissions) == 1
+    assert len(at.get("balloons")) == 1
+    assert not at.button(key="continue").disabled
+    assert not at.button(key="finish").disabled
 
 
 def test_each_push_button_records_and_immediately_advances(monkeypatch):
@@ -169,7 +184,7 @@ def test_google_drive_storage_submits_one_complete_batch_from_live_app(monkeypat
             status_code = 200
 
             def json(self):
-                return {"ok": True, "batch_id": payload["p_batch"]["batch_id"], "row_count": 10,
+                return {"ok": True, "batch_id": payload["p_batch"]["batch_id"], "row_count": len(payload["p_votes"]),
                         "submission_sha256": hashlib.sha256(envelope["payload"].encode()).hexdigest()}
 
         return Receipt()
@@ -184,43 +199,181 @@ def test_google_drive_storage_submits_one_complete_batch_from_live_app(monkeypat
     at.button(key="start").click().run()
     finish_batch(at)
     assert at.session_state.person.phase == "milestone"
-    assert len(submissions) == 1 and len(submissions[0]["p_votes"]) == 10
+    assert len(submissions) == 1 and len(submissions[0]["p_votes"]) == BATCH_SIZE
+    assert [vote["target_resolution"] for vote in submissions[0]["p_votes"]] == [48, 64, 128] * 5
     assert all(vote["winner"] != "tie" for vote in submissions[0]["p_votes"])
 
 
-def test_saved_batch_has_two_second_locked_stats_transition_then_main_action(monkeypatch):
+def test_saved_batch_shows_actions_immediately_and_celebrates_once(monkeypatch):
     at = app(monkeypatch)
-    finish_batch(at, unlock=False)
+    finish_batch(at)
     person = at.session_state.person
-    assert person.completed == 10 and person.phase == "milestone"
+    assert person.completed == BATCH_SIZE and person.phase == "milestone"
     assert len(at.session_state.store.submissions) == 1  # Already saved before celebration.
-    assert 0 < person.celebration_ready_at - time.monotonic() <= 2.0
-    assert not at.button  # No Continue, Finish, vote, or Back during this phase.
+    assert len(at.get("balloons")) == 1
     visible = " ".join(item.value for item in at.markdown)
-    assert 'class="counting-total"' in visible
-    assert "--count-from:0;--count-to:10" in visible
-    deadline = person.celebration_ready_at
-    at.run()
-    assert at.session_state.person.celebration_ready_at == deadline
-    assert not at.button
-    unlock_milestone(at)
-    assert at.button(key="continue").label == "En faire 10 autres"
+    assert '<strong>15</strong> comparaisons' in visible
+    assert at.button(key="continue").label == "En faire 15 autres"
     assert at.button(key="finish").label == "Terminer"
     assert at.session_state.person.celebration_ready_at is None
     assert at.session_state.person.celebrated_batch == person.batch.batch_id
     assert len(at.session_state.store.submissions) == 1
-    # A normal rerun must not re-lock an already celebrated batch.
+    # Reruns keep actions available without replaying the celebration or saving again.
     at.run()
-    assert at.button(key="continue").label == "En faire 10 autres"
+    assert at.button(key="continue").label == "En faire 15 autres"
+    assert not at.get("balloons")
+    assert len(at.session_state.store.submissions) == 1
 
 
-def test_next_batch_gets_its_own_counter_animation(monkeypatch):
+def test_next_batch_gets_its_own_balloons_and_immediate_actions(monkeypatch):
     at = app(monkeypatch)
     finish_batch(at)
     at.button(key="continue").click().run()
-    finish_batch(at, unlock=False)
-    assert not at.button
+    finish_batch(at)
+    assert len(at.get("balloons")) == 1
+    assert not at.button(key="continue").disabled
+    assert not at.button(key="finish").disabled
     visible = " ".join(item.value for item in at.markdown)
-    assert "--count-from:10;--count-to:20" in visible
-    assert at.session_state.person.completed == 20
+    assert '<strong>30</strong> comparaisons' in visible
+    assert at.session_state.person.completed == 30
     assert len(at.session_state.store.submissions) == 2
+
+
+def test_welcome_language_switch_updates_copy_without_replacing_participant(monkeypatch):
+    monkeypatch.setenv("PIXEL_STUDY_PREVIEW", "1")
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=20).run()
+    participant_id = at.session_state.person.participant_id
+    assert at.radio(key="language_choice").options == ["Français", "English"]
+    assert at.button(key="start").label == "Commencer"
+    for language, question, start, footer in (
+        ("en", "Which pixel art do you prefer?", "Start", "Anonymous"),
+        ("fr", "Quel pixel art préfères-tu ?", "Commencer", "Anonyme"),
+    ):
+        at.radio(key="language_choice").set_value(language).run()
+        assert not at.exception
+        assert at.button(key="start").label == start
+        visible = " ".join(item.value for item in at.markdown)
+        assert question in visible and footer in visible
+        assert at.session_state.person.participant_id == participant_id
+        assert at.session_state.person.phase == "welcome"
+        assert not at.session_state.store.submissions
+
+
+def test_english_persists_across_votes_reruns_batches_and_finish(monkeypatch):
+    at = app(monkeypatch, "en")
+    participant_id = at.session_state.person.participant_id
+    for number in (1, 2):
+        at.run()  # The welcome-only widget has been removed; its language must persist.
+        assert not at.exception
+        assert at.session_state.language == "en"
+        assert not at.radio
+        visible = " ".join(item.value for item in at.markdown)
+        assert "Which pixel art do you prefer?" in visible
+        assert f"Batch {number}" in visible
+        assert "Image 1/15" in visible
+        assert at.button(key="back").label == "← Back"
+        assert vote_button(at, "Left image").label == "Left"
+        assert vote_button(at, "Right image").label == "Right"
+        finish_batch(at, "Right image")
+        visible = " ".join(item.value for item in at.markdown)
+        assert f"Batch {number} completed" in visible
+        assert f"<strong>{number * BATCH_SIZE}</strong> comparisons" in visible
+        assert ("to Pixel Enthusiast" if number == 1 else "to Pixel Expert") in visible
+        assert at.button(key="continue").label == "Do 15 more"
+        assert at.button(key="finish").label == "Finish"
+        assert at.session_state.person.participant_id == participant_id
+        if number == 1:
+            assert "New: Pixel Explorer" in visible
+            at.button(key="continue").click().run()
+    for payload in at.session_state.store.submissions.values():
+        assert len(payload["p_votes"]) == BATCH_SIZE
+        assert all(vote["selected_side"] == "right" for vote in payload["p_votes"])
+        assert all(vote["winner"] == vote["right_method"] for vote in payload["p_votes"])
+    at.button(key="finish").click().run()
+    assert not at.exception
+    assert at.session_state.person.phase == "finished"
+    assert "Thank you!" in " ".join(item.value for item in at.markdown)
+    shared = json.loads(at.get("bidi_component")[0].proto.json)
+    assert "I evaluated 30 pairs of pixel art" in shared["text"]
+    assert "compare 15 pairs of images" in shared["text"]
+    assert shared["share_label"] == "Share my score"
+    assert participant_id not in json.dumps(shared)
+
+
+def test_unavailable_study_message_also_switches_language(monkeypatch):
+    monkeypatch.delenv("PIXEL_STUDY_PREVIEW", raising=False)
+    at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=20)
+    at.secrets["supabase"] = {"url": "https://test.supabase.co", "secret_key": "invalid"}
+    at.run()
+    at.radio(key="language_choice").set_value("en").run()
+    assert not at.exception
+    assert at.button(key="start").label == "Start" and at.button(key="start").disabled
+    assert "Participation will open soon." in " ".join(item.value for item in at.markdown)
+
+
+def test_fifteen_comparisons_follow_the_resolution_cycle_and_only_then_submit(monkeypatch):
+    at = app(monkeypatch)
+    resolutions = []
+    for index in range(15):
+        batch = at.session_state.person.batch
+        resolutions.append(batch.comparisons[batch.index].left.resolution)
+        assert at.session_state.person.completed == 0
+        assert not at.session_state.store.submissions
+        visible = " ".join(item.value for item in at.markdown)
+        assert f"Image {index + 1}/15" in visible
+        assert 'aria-valuemax="15"' in visible
+        assert f'aria-valuenow="{index}"' in visible
+        vote_button(at, "Left image").click().run()
+        assert not at.exception
+    assert resolutions == [48, 64, 128] * 5
+    assert at.session_state.person.completed == 15
+    assert len(at.session_state.store.submissions) == 1
+
+
+def test_hot_reload_keeps_an_active_legacy_batch_then_starts_the_new_protocol(monkeypatch):
+    at = app(monkeypatch)
+    person = at.session_state.person
+    participant_id = person.participant_id
+    person.batch.comparisons = person.batch.comparisons[:10]
+    at.session_state.person = SimpleNamespace(**vars(person))  # Simulate an old class retained by Streamlit.
+    at.run()
+    for _ in range(10):
+        vote_button(at, "Left image").click().run()
+        assert not at.exception
+    assert at.session_state.person.completed == 10
+    at.button(key="continue").click().run()
+    batch = at.session_state.person.batch
+    assert batch.number == 2 and len(batch.comparisons) == 15
+    assert [item.left.resolution for item in batch.comparisons] == [48, 64, 128] * 5
+    assert at.session_state.person.participant_id == participant_id
+    finish_batch(at)
+    assert at.session_state.person.completed == 25
+    assert len(at.session_state.store.submissions) == 2
+
+
+@pytest.mark.parametrize("language,label", [("fr", "En faire 15 autres"), ("en", "Do 15 more")])
+def test_final_screen_can_resume_with_the_same_participant_and_vote_history(monkeypatch, language, label):
+    at = app(monkeypatch, language)
+    participant_id = at.session_state.person.participant_id
+    finish_batch(at)
+    references = {item.pair.reference.sha256 for item in at.session_state.person.history}
+    at.button(key="finish").click().run()
+    assert at.button(key="resume").label == label
+    shared = json.loads(at.get("bidi_component")[0].proto.json)
+    assert shared["messages_label"] == ("Envoyer par message" if language == "fr" else "Send a message")
+    at.button(key="resume").click().run()
+    assert not at.exception
+    person = at.session_state.person
+    assert person.phase == "evaluation" and person.completed == 15
+    assert person.participant_id == participant_id and at.session_state.language == language
+    assert person.batch.number == 2 and person.batch.index == 0
+    assert [item.left.resolution for item in person.batch.comparisons] == [48, 64, 128] * 5
+    assert not references & {item.pair.reference.sha256 for item in person.batch.comparisons}
+    assert len(person.history) == 15 and len(at.session_state.store.submissions) == 1
+    assert not at.get("bidi_component")
+    finish_batch(at)
+    assert at.session_state.person.completed == 30
+    assert len(at.session_state.store.submissions) == 2
+    at.button(key="finish").click().run()
+    shared = json.loads(at.get("bidi_component")[0].proto.json)
+    assert "30" in shared["text"]

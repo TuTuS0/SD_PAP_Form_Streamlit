@@ -1,7 +1,7 @@
 # Enregistrer les résultats CSV dans ton Google Drive
 
 L’application peut utiliser Google Drive à la place de Supabase. Chaque lot
-terminé produit **un fichier CSV de 10 lignes de votes**, en plus de l’en-tête.
+terminé produit **un fichier CSV de 15 lignes de votes**, en plus de l’en-tête.
 Les fichiers restent dans un dossier privé de ton Drive. Les participants
 n’ont pas besoin de compte Google et ne voient ni le dossier ni les fichiers.
 
@@ -80,13 +80,15 @@ Un lot en cours conserve son stockage d’origine jusqu’à la fin de sa sessio
 
 ## 3. Vérifier un premier lot
 
-Utilise d’abord un dossier de test. Termine 10 comparaisons et vérifie :
+Utilise d’abord un dossier de test. Termine 15 comparaisons et vérifie :
 
 - Un CSV apparaît dans le dossier.
-- Il contient 10 votes, avec le même `participant_id` et le même `batch_id`.
-- `batch_comparison_number` va de 1 à 10 et chaque vote possède un gagnant.
+- Il contient 15 votes, avec le même `participant_id` et le même `batch_id`.
+- `batch_comparison_number` va de 1 à 15 et chaque vote possède un gagnant.
+- `target_resolution` suit exactement **48, 64, 128**, cinq fois : cinq votes
+  pour chaque résolution.
 - Un second lot conserve `participant_id`, utilise un nouveau `batch_id`, et
-  `comparison_number` passe de 11 à 20.
+  `comparison_number` passe de 16 à 30.
 
 Les fichiers portent des noms comme :
 
@@ -132,3 +134,8 @@ et les lots déjà créés restent dans Drive.
 Après une modification de `Code.gs`, mets le déploiement à jour via
 **Déployer → Gérer les déploiements → Modifier → Nouvelle version**. Enregistrer
 le code seul ne met pas à jour le récepteur `/exec`.
+
+Pour passer d’anciens lots de 10 aux nouveaux lots de 15, remplace le code par
+la version actuelle et mets ce même déploiement à jour. Les anciens CSV restent
+compatibles : ne les supprime pas. Un lot de 10 déjà commencé peut se terminer,
+puis le lot suivant passe à 15 avec la même identité et une numérotation continue.

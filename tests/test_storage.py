@@ -71,7 +71,7 @@ TEST_SECRET = "local-tests-only-" + "x" * 32
 
 def drive_receipt(envelope):
     return {"ok": True, "batch_id": json.loads(envelope["payload"])["p_batch"]["batch_id"],
-            "row_count": 10, "submission_sha256": hashlib.sha256(envelope["payload"].encode()).hexdigest()}
+            "row_count": len(json.loads(envelope["payload"])["p_votes"]), "submission_sha256": hashlib.sha256(envelope["payload"].encode()).hexdigest()}
 
 
 def http_response(data, status=200, headers=None):
@@ -81,7 +81,8 @@ def http_response(data, status=200, headers=None):
     return result
 
 
-def test_drive_signs_canonical_utf8_request_and_checks_full_receipt(monkeypatch):
+@pytest.mark.parametrize("size", [10, 15])
+def test_drive_signs_canonical_utf8_request_and_checks_full_receipt(monkeypatch, size):
     def send(url, **kwargs):
         envelope = kwargs["json"]
         expected = hmac.new(TEST_SECRET.encode(), envelope["payload"].encode(), hashlib.sha256).hexdigest()
@@ -91,7 +92,7 @@ def test_drive_signs_canonical_utf8_request_and_checks_full_receipt(monkeypatch)
         return http_response(drive_receipt(envelope))
 
     monkeypatch.setattr(requests, "post", send)
-    payload = {"p_batch": {"batch_id": "id"}, "p_votes": [{"prompt": 'étoile, "bleue"\n🌟'}] * 10}
+    payload = {"p_batch": {"batch_id": "id"}, "p_votes": [{"prompt": 'étoile, "bleue"\n🌟'}] * size}
     assert GoogleDriveCSVStore(DRIVE_URL, TEST_SECRET).save_batch(payload) == "id"
 
 
@@ -105,7 +106,7 @@ def test_drive_handles_google_content_redirect_without_forwarding_payload(monkey
     get = Mock(side_effect=lambda *args, **kwargs: http_response(drive_receipt(captured)))
     monkeypatch.setattr(requests, "post", send)
     monkeypatch.setattr(requests, "get", get)
-    assert GoogleDriveCSVStore(DRIVE_URL, TEST_SECRET).save_batch({"p_batch": {"batch_id": "id"}}) == "id"
+    assert GoogleDriveCSVStore(DRIVE_URL, TEST_SECRET).save_batch({"p_batch": {"batch_id": "id"}, "p_votes": [{}] * 15}) == "id"
     assert "json" not in get.call_args.kwargs and "data" not in get.call_args.kwargs
     assert get.call_args.kwargs["allow_redirects"] is False
 
@@ -116,6 +117,18 @@ def test_drive_does_not_accept_partial_or_invalid_receipts(monkeypatch, receipt)
     monkeypatch.setattr(requests, "post", Mock(return_value=http_response(receipt)))
     with pytest.raises(StorageError):
         GoogleDriveCSVStore(DRIVE_URL, TEST_SECRET).save_batch({"p_batch": {"batch_id": "id"}})
+
+
+@pytest.mark.parametrize("row_count", [10, 14, 16])
+def test_drive_receipt_must_confirm_every_vote_in_the_new_batch(monkeypatch, row_count):
+    def send(url, **kwargs):
+        receipt = drive_receipt(kwargs["json"])
+        receipt["row_count"] = row_count
+        return http_response(receipt)
+
+    monkeypatch.setattr(requests, "post", send)
+    with pytest.raises(StorageError):
+        GoogleDriveCSVStore(DRIVE_URL, TEST_SECRET).save_batch({"p_batch": {"batch_id": "id"}, "p_votes": [{}] * 15})
 
 
 def test_drive_does_not_follow_unexpected_redirects(monkeypatch):

@@ -55,7 +55,7 @@ class GoogleDriveCSVStore:
             receipt = response.json()
             if (not isinstance(receipt, dict) or receipt.get("ok") is not True
                     or receipt.get("batch_id") != payload["p_batch"]["batch_id"]
-                    or receipt.get("row_count") != 10 or receipt.get("submission_sha256") != digest):
+                    or receipt.get("row_count") != len(payload["p_votes"]) or receipt.get("submission_sha256") != digest):
                 raise StorageError("Google Drive did not confirm the complete batch.")
         except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
             raise StorageError("The batch could not be confirmed in Google Drive.") from exc

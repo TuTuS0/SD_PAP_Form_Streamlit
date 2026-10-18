@@ -13,11 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-BATCH_SIZE = 10
+BATCH_SIZE = 15
+RESOLUTION_ORDER = (48, 64, 128)
 REFERENCE_METHOD = "SDPAP"
 COMPETITORS = ("AOP", "APIP", "FLUX", "GPTImage", "MYOS", "PAP", "PIA")
 METHODS = (*COMPETITORS, REFERENCE_METHOD)
-SAMPLER_VERSION = "balanced-reference-without-replacement-v2"
+SAMPLER_VERSION = "balanced-reference-resolution-cycle-v3"
+LEGACY_SAMPLER_VERSION = "balanced-reference-without-replacement-v2"
 ACHIEVEMENTS = (
     (10, "Pixel Explorer", "✦"),
     (30, "Pixel Enthusiast", "✧"),
@@ -32,7 +34,7 @@ class DatasetError(ValueError):
 
 
 class PoolTooSmall(ValueError):
-    """Ten distinct comparisons cannot be formed."""
+    """A complete batch with the required resolution sequence cannot be formed."""
 
 
 @dataclass(frozen=True)
@@ -132,26 +134,42 @@ def load_pool(manifest_path: Path, base_dir: Path) -> tuple[tuple[Pair, ...], st
             reference_with_text = Asset(**{**reference.__dict__, "prompt": text})
             other_with_text = Asset(**{**other.__dict__, "prompt": text})
             pairs.append(Pair(comparison_id, reference_with_text, other_with_text))
-    if len(pairs) < BATCH_SIZE:
-        raise PoolTooSmall("At least 10 distinct verified image pairs are required to start a batch.")
-    if len({pair.reference.sha256 for pair in pairs}) < BATCH_SIZE:
-        raise PoolTooSmall("At least 10 distinct reference images are required to start a batch.")
+    _validate_resolution_pool(tuple(pairs))
     version = hashlib.sha256(json.dumps([
         (pair.comparison_id, pair.reference.prompt) for pair in pairs
     ], ensure_ascii=False).encode()).hexdigest()
     return tuple(pairs), version
 
 
+def _can_fill_resolution_slots(references: dict[int, set[str]], used: set[str], remaining: Counter) -> bool:
+    # Hall's condition for three resolution groups, including hashes shared by
+    # resolutions: the remaining slots must have enough distinct image hashes.
+    for mask in range(1, 1 << len(RESOLUTION_ORDER)):
+        groups = [resolution for index, resolution in enumerate(RESOLUTION_ORDER) if mask & (1 << index)]
+        needed = sum(remaining[resolution] for resolution in groups)
+        if needed and len(set().union(*(references[resolution] for resolution in groups)) - used) < needed:
+            return False
+    return True
+
+
+def _validate_resolution_pool(pool: tuple[Pair, ...]) -> dict[int, set[str]]:
+    references = {resolution: {pair.reference.sha256 for pair in pool if pair.reference.resolution == resolution}
+                  for resolution in RESOLUTION_ORDER}
+    if not _can_fill_resolution_slots(references, set(), Counter(RESOLUTION_ORDER * (BATCH_SIZE // 3))):
+        raise PoolTooSmall("A batch needs 15 distinct reference images: five each at 48, 64 and 128.")
+    return references
+
+
 def sample_batch(pool: tuple[Pair, ...], history: list[PresentedPair], seed: str) -> list[PresentedPair]:
     """Draw reference images without replacement across the whole participation.
 
-    All reference images must be seen before one is reused. Within a batch,
-    reference images remain distinct even at a reference-cycle boundary. For
-    each reference, prefer an unseen competitor pair, then balance methods,
-    resolutions, and prompts. Sparse strata use the best available balance.
+    Follow 48 -> 64 -> 128 exactly five times. Within each required resolution,
+    prefer the least exposed reference, then an unseen competitor pair, balanced
+    methods and prompts. References stay distinct throughout the batch, including
+    cycle boundaries. An exhausted resolution can repeat in later batches.
     """
-    if len({pair.reference.sha256 for pair in pool}) < BATCH_SIZE:
-        raise PoolTooSmall("At least 10 distinct reference images are needed for a full batch.")
+    references = _validate_resolution_pool(pool)
+    remaining = Counter(RESOLUTION_ORDER * (BATCH_SIZE // 3))
     rng = random.Random(seed)
     methods: Counter = Counter()
     resolutions: Counter = Counter()
@@ -173,9 +191,10 @@ def sample_batch(pool: tuple[Pair, ...], history: list[PresentedPair], seed: str
 
     selected: list[PresentedPair] = []
     selected_references: set[str] = set()
-    for _ in range(BATCH_SIZE):
+    for resolution in RESOLUTION_ORDER * (BATCH_SIZE // 3):
+        remaining[resolution] -= 1
         candidates = [pair for pair in pool
-                      if pair.reference.sha256 not in selected_references]
+                      if pair.reference.resolution == resolution and pair.reference.sha256 not in selected_references]
 
         def priority(pair: Pair) -> tuple:
             return (reference_exposures[pair.reference.sha256], pair_exposures[pair.comparison_id],
@@ -184,7 +203,8 @@ def sample_batch(pool: tuple[Pair, ...], history: list[PresentedPair], seed: str
                     batch_prompts[pair.reference.prompt_id], prompts[pair.reference.prompt_id],
                     strata[pair.competitor.method, pair.reference.resolution], rng.random())
 
-        pair = min(candidates, key=priority)
+        pair = next(pair for pair in sorted(candidates, key=priority)
+                    if _can_fill_resolution_slots(references, selected_references | {pair.reference.sha256}, remaining))
         appearances = pair_exposures[pair.comparison_id]
         selected.append(PresentedPair(pair, rng.choice((True, False)), appearances + 1, appearances > 0))
         selected_references.add(pair.reference.sha256)
@@ -240,14 +260,18 @@ class Participant:
         unsaved = len(self.batch.answers) if self.batch and self.phase in {"evaluation", "submitting"} else 0
         return self.completed + unsaved
 
+    @property
+    def completed_batches(self) -> int:
+        if self.batch is None:
+            return 0
+        return self.batch.number if self.phase in {"milestone", "finished"} else self.batch.number - 1
+
     def start_batch(self, pool: tuple[Pair, ...]) -> None:
-        if self.phase not in {"welcome", "milestone"}:
+        if self.phase not in {"welcome", "milestone", "finished"}:
             raise ValueError("Complete and submit the current batch first.")
-        if self.celebration_ready_at is not None:
-            raise ValueError("Wait for the completion animation to finish.")
         seed = secrets.token_hex(16)
         comparisons = sample_batch(pool, self.history, seed)
-        self.batch = Batch(str(uuid4()), self.completed // BATCH_SIZE + 1, seed, comparisons)
+        self.batch = Batch(str(uuid4()), self.completed_batches + 1, seed, comparisons)
         self.pending_submission = None
         self.celebration_ready_at = None
         self.phase = "evaluation"
@@ -263,8 +287,9 @@ class Participant:
         if self.pending_submission is not None:
             return self.pending_submission
         batch = self.batch
-        if self.phase != "evaluation" or batch is None or set(batch.answers) != set(range(BATCH_SIZE)):
-            raise ValueError("Exactly 10 answered comparisons are required before submission.")
+        if (self.phase != "evaluation" or batch is None or len(batch.comparisons) not in {10, BATCH_SIZE}
+                or set(batch.answers) != set(range(len(batch.comparisons)))):
+            raise ValueError("Every comparison in the full batch must be answered before submission.")
         if any(answer.side not in {"left", "right"} for answer in batch.answers.values()):
             raise ValueError("Every comparison must have a selected winning image.")
         votes = []
@@ -288,7 +313,8 @@ class Participant:
         self.pending_submission = {
             "p_batch": {"participant_id": self.participant_id, "batch_id": batch.batch_id,
                         "batch_number": batch.number, "dataset_version": dataset_version,
-                        "sampler_version": SAMPLER_VERSION, "sampling_seed": batch.seed},
+                        "sampler_version": SAMPLER_VERSION if len(batch.comparisons) == BATCH_SIZE else LEGACY_SAMPLER_VERSION,
+                        "sampling_seed": batch.seed, "batch_size": len(batch.comparisons)},
             "p_votes": votes,
         }
         self.phase = "submitting"
@@ -302,12 +328,11 @@ class Participant:
         if self.phase != "submitting":
             raise ValueError("This batch is not awaiting a receipt.")
         self.history.extend(self.batch.comparisons)
-        self.completed += BATCH_SIZE
+        self.completed += len(self.batch.comparisons)
         self.phase = "milestone"
 
     def finish(self) -> None:
         if self.phase != "milestone":
             raise ValueError("Finish is available after a saved batch.")
-        if self.celebration_ready_at is not None:
-            raise ValueError("Wait for the completion animation to finish.")
+        self.celebration_ready_at = None
         self.phase = "finished"

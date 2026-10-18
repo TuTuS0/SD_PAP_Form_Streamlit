@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from study import (
-    ACHIEVEMENTS, COMPETITORS, Asset, DatasetError, Pair, Participant,
+    ACHIEVEMENTS, BATCH_SIZE, COMPETITORS, RESOLUTION_ORDER, Asset, DatasetError, Pair, Participant,
     PoolTooSmall, earned_achievements, load_pool, next_achievement, sample_batch,
 )
 
@@ -22,7 +22,7 @@ def synthetic_pool(count=21):
     pairs = []
     for index in range(count):
         method = COMPETITORS[index % 7]
-        res = (48, 64, 128)[index // 7 % 3]
+        res = RESOLUTION_ORDER[index % 3]
         ref = Asset("SDPAP", res, str(index), str(index), "", "images/ref.png", f"{index + 1:064x}")
         other = Asset(method, res, str(index), str(index), "", "images/other.png", "b" * 64)
         pairs.append(Pair(f"{index:064x}", ref, other))
@@ -31,7 +31,7 @@ def synthetic_pool(count=21):
 
 def complete(person, pool, version="d" * 64):
     person.start_batch(pool)
-    for index in range(10):
+    for index in range(BATCH_SIZE):
         person.batch.index = index
         person.answer(("left", "right")[index % 2])
     payload = person.prepare_submission(version)
@@ -64,8 +64,9 @@ def test_balanced_across_methods_resolutions_and_prompts(real_pool):
     history = []
     for batch in range(20):
         selected = sample_batch(pool, history, f"batch-{batch}")
-        assert len(selected) == len({p.pair.comparison_id for p in selected}) == 10
-        assert len({p.pair.reference.sha256 for p in selected}) == 10
+        assert len(selected) == len({p.pair.comparison_id for p in selected}) == BATCH_SIZE
+        assert len({p.pair.reference.sha256 for p in selected}) == BATCH_SIZE
+        assert [p.pair.reference.resolution for p in selected] == [48, 64, 128] * 5
         assert not {p.pair.comparison_id for p in selected} & {p.pair.comparison_id for p in history}
         batch_methods = Counter(p.pair.competitor.method for p in selected)
         batch_resolutions = Counter(p.pair.reference.resolution for p in selected)
@@ -73,7 +74,7 @@ def test_balanced_across_methods_resolutions_and_prompts(real_pool):
         assert max(batch_methods.values()) - min(batch_methods.values()) <= 1
         assert set(batch_resolutions) == {48, 64, 128}
         assert max(batch_resolutions.values()) - min(batch_resolutions.values()) <= 1
-        assert len({p.pair.reference.prompt_id for p in selected}) == 10
+        assert len({p.pair.reference.prompt_id for p in selected}) == BATCH_SIZE
         history.extend(selected)
         methods = Counter(p.pair.competitor.method for p in history)
         resolutions = Counter(p.pair.reference.resolution for p in history)
@@ -85,58 +86,61 @@ def test_balanced_across_methods_resolutions_and_prompts(real_pool):
     assert max(prompts.values()) <= 4
 
 
-@pytest.mark.parametrize("pool_size", [10, 11, 13, 20, 21, 27])
+@pytest.mark.parametrize("pool_size", [15, 16, 19, 20, 21, 27])
 def test_exhaustion_uses_unseen_first_then_repeats_without_short_batches(pool_size):
     pool = synthetic_pool(pool_size)
     history = []
-    seen = set()
+    seen = {resolution: set() for resolution in RESOLUTION_ORDER}
+    sizes = Counter(pair.reference.resolution for pair in pool)
     for batch in range(12):
         selected = sample_batch(pool, history, str(batch))
-        assert len(selected) == len({p.pair.comparison_id for p in selected}) == 10
+        assert len(selected) == len({p.pair.comparison_id for p in selected}) == BATCH_SIZE
+        assert [p.pair.reference.resolution for p in selected] == [48, 64, 128] * 5
         for item in selected:
-            if len(seen) < pool_size:
-                assert item.pair.comparison_id not in seen
+            resolution = item.pair.reference.resolution
+            if len(seen[resolution]) < sizes[resolution]:
+                assert item.pair.comparison_id not in seen[resolution]
                 assert not item.is_repeat
             else:
                 assert item.is_repeat
                 assert item.pool_cycle > 1
-            seen.add(item.pair.comparison_id)
+            seen[resolution].add(item.pair.comparison_id)
         history.extend(selected)
 
 
 def test_tiny_pool_has_no_partial_batch():
     with pytest.raises(PoolTooSmall):
-        sample_batch(synthetic_pool(9), [], "seed")
+        sample_batch(synthetic_pool(BATCH_SIZE - 1), [], "seed")
 
 
 def test_entire_repository_pool_can_be_exhausted_and_continued(real_pool):
     pool, _ = real_pool
     history = []
-    for number in range(len(pool) // 10):
+    for number in range(len(pool) // BATCH_SIZE):
         selected = sample_batch(pool, history, f"full-pool-{number}")
-        assert len({item.pair.reference.sha256 for item in selected}) == 10
+        assert len({item.pair.reference.sha256 for item in selected}) == BATCH_SIZE
         history.extend(selected)
-        if (number + 1) % 30 == 0:
+        if (number + 1) % 20 == 0:
             assert len({item.pair.reference.sha256 for item in history[-300:]}) == 300
     assert len({item.pair.comparison_id for item in history}) == len(pool)
     assert not any(item.is_repeat for item in history)
     continued = sample_batch(pool, history, "after-exhaustion")
-    assert len(continued) == 10
+    assert len(continued) == BATCH_SIZE
     assert all(item.is_repeat and item.pool_cycle == 2 for item in continued)
 
 
 def test_reference_images_do_not_repeat_across_participant_batches(real_pool):
     pool, _ = real_pool
     person = Participant()
-    for _ in range(30):
+    for _ in range(20):
         complete(person, pool)
     assert len(person.history) == 300
     assert len({item.pair.reference.sha256 for item in person.history}) == 300
     assert not any(item.is_repeat for item in person.history)
     complete(person, pool)
-    assert len({item.pair.reference.sha256 for item in person.history[-10:]}) == 10
+    assert len({item.pair.reference.sha256 for item in person.history[-BATCH_SIZE:]}) == BATCH_SIZE
     # The image can now recur, but its competitor pair is still new.
-    assert not any(item.is_repeat for item in person.history[-10:])
+    assert not any(item.is_repeat for item in person.history[-BATCH_SIZE:])
 
 
 def test_many_pairs_from_one_reference_cannot_form_a_batch():
@@ -156,13 +160,14 @@ def test_many_batches_share_identity_and_numbering():
         payload = complete(person, synthetic_pool())
         assert person.participant_id == original_id
         assert payload["p_batch"]["batch_number"] == number
-        assert len(payload["p_votes"]) == 10
-        assert [v["comparison_number"] for v in payload["p_votes"]] == list(range((number - 1) * 10 + 1, number * 10 + 1))
+        assert len(payload["p_votes"]) == payload["p_batch"]["batch_size"] == BATCH_SIZE
+        assert [v["comparison_number"] for v in payload["p_votes"]] == list(range((number - 1) * BATCH_SIZE + 1, number * BATCH_SIZE + 1))
+        assert [v["target_resolution"] for v in payload["p_votes"]] == [48, 64, 128] * 5
         assert all(v["participant_id"] == original_id for v in payload["p_votes"])
         assert payload["p_batch"]["batch_id"] not in ids
         ids.add(payload["p_batch"]["batch_id"])
         person.confirm_submission(payload["p_batch"]["batch_id"])
-        assert person.completed == number * 10
+        assert person.completed == number * BATCH_SIZE
     assert earned_achievements(person.completed) == list(ACHIEVEMENTS)
     assert next_achievement(person.completed) is None
     person.finish()
@@ -192,7 +197,7 @@ def test_partial_batch_cannot_submit_and_choices_survive_back_navigation():
 def test_submission_is_frozen_until_acknowledged():
     person = Participant()
     person.start_batch(synthetic_pool())
-    for index in range(10):
+    for index in range(BATCH_SIZE):
         person.batch.index = index
         person.answer("right")
     payload = person.prepare_submission("d" * 64)
@@ -211,25 +216,26 @@ def test_every_vote_requires_a_winner():
     with pytest.raises(ValueError):
         person.answer("tie")
     assert not person.batch.answers
-    for index in range(10):
+    for index in range(BATCH_SIZE):
         person.batch.index = index
         person.answer("left")
     payload = person.prepare_submission("d" * 64)
     assert all(vote["winner"] == vote["left_method"] for vote in payload["p_votes"])
 
 
-def test_completion_animation_prevents_start_or_finish_until_released():
+@pytest.mark.parametrize("action", ["continue", "finish"])
+def test_saved_batch_actions_are_immediate_even_with_a_legacy_animation_deadline(action):
     person = Participant()
     complete(person, synthetic_pool())
     person.celebration_ready_at = 123.0
-    with pytest.raises(ValueError, match="animation"):
+    if action == "continue":
         person.start_batch(synthetic_pool())
-    with pytest.raises(ValueError, match="animation"):
+        assert person.batch.number == 2 and person.phase == "evaluation"
+    else:
         person.finish()
-    assert person.completed == 10
-    person.celebration_ready_at = None
-    person.start_batch(synthetic_pool())
-    assert person.batch.number == 2
+        assert person.phase == "finished"
+    assert person.completed == BATCH_SIZE
+    assert person.celebration_ready_at is None
 
 
 @pytest.mark.parametrize("threshold,name,icon", ACHIEVEMENTS)
@@ -237,6 +243,48 @@ def test_achievements_depend_only_on_count(threshold, name, icon):
     assert (threshold, name, icon) not in earned_achievements(threshold - 1)
     assert (threshold, name, icon) in earned_achievements(threshold)
     assert next_achievement(threshold - 1) == (threshold, name, icon)
+
+
+def test_a_legacy_batch_can_finish_then_continue_with_fifteen_comparisons():
+    person = Participant()
+    person.start_batch(synthetic_pool())
+    person.batch.comparisons = person.batch.comparisons[:10]
+    for index in range(10):
+        person.batch.index = index
+        person.answer("left")
+    payload = person.prepare_submission("d" * 64)
+    person.confirm_submission(payload["p_batch"]["batch_id"])
+    assert person.completed == 10 and person.completed_batches == 1
+    payload = complete(person, synthetic_pool())
+    assert payload["p_batch"]["batch_number"] == 2
+    assert payload["p_batch"]["batch_size"] == 15
+    assert [vote["comparison_number"] for vote in payload["p_votes"]] == list(range(11, 26))
+    assert person.completed == 25 and person.completed_batches == 2
+
+
+def test_missing_resolution_cannot_be_replaced_by_extra_images_from_other_resolutions():
+    pool = tuple(pair for pair in synthetic_pool(60) if pair.reference.resolution != 128)
+    with pytest.raises(PoolTooSmall):
+        sample_batch(pool, [], "missing-stratum")
+
+
+def test_shared_hashes_do_not_strand_later_resolution_slots():
+    from dataclasses import replace
+
+    pool = synthetic_pool(30)
+    groups = {resolution: [pair for pair in pool if pair.reference.resolution == resolution]
+              for resolution in RESOLUTION_ORDER}
+    shared = {pair.reference.sha256 for pair in groups[48][:5]}
+    groups[64] = [replace(pair, reference=replace(pair.reference, sha256=groups[48][index].reference.sha256))
+                  for index, pair in enumerate(groups[64][:5])]
+    feasible = tuple(groups[48] + groups[64] + groups[128][:5])
+    for seed in range(4):
+        selected = sample_batch(feasible, [], str(seed))
+        assert len({item.pair.reference.sha256 for item in selected}) == 15
+        assert not shared & {item.pair.reference.sha256 for item in selected if item.pair.reference.resolution == 48}
+    impossible = tuple(groups[48][:5] + groups[64] + groups[128])
+    with pytest.raises(PoolTooSmall):
+        sample_batch(impossible, [], "overlapping-strata")
 
 
 def write_manifest(tmp_path, rows):

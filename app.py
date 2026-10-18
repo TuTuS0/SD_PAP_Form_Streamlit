@@ -5,21 +5,31 @@ import base64
 import html
 import io
 import os
-import time
 from pathlib import Path
 
 import streamlit as st
 from PIL import Image, ImageOps
 from streamlit.errors import StreamlitSecretNotFoundError
 
+from i18n import LANGUAGES, translate
+from score_share import render_score_share
 from storage import PreviewStore, StorageError, create_store
 from study import BATCH_SIZE, DatasetError, Participant, PoolTooSmall, earned_achievements, load_pool, next_achievement
 
 ROOT = Path(__file__).resolve().parent
 CHOICES = {"Gauche": "left", "Droite": "right"}
-MILESTONE_SECONDS = 2.0
 
-st.set_page_config(page_title="Pixel Art Preference Study", page_icon="✦", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title=translate(st.session_state.get("language", "fr"), "page_title"),
+                   page_icon="✦", layout="centered", initial_sidebar_state="collapsed")
+
+
+def t(key: str, **values) -> str:
+    return translate(st.session_state.get("language", "fr"), key, **{"size": BATCH_SIZE, **values})
+
+
+def change_language():
+    # Keep a separate, non-widget key: the selector is only present on welcome.
+    st.session_state.language = st.session_state.language_choice
 
 
 def styles():
@@ -28,9 +38,7 @@ def styles():
 
 
 def brand(preview: bool):
-    mode = '<span class="preview-label" title="Aperçu : aucune réponse n’est enregistrée">APERÇU</span>' if preview else ""
-    st.markdown('<header class="app-header"><span class="brand"><span class="brand-mark" aria-hidden="true">'
-                + '<i></i>' * 4 + '</span>Pixel Lab</span>' + mode + '</header>', unsafe_allow_html=True)
+    """Keep the entry point without adding a header above the comparison."""
 
 
 @st.cache_resource(show_spinner=False)
@@ -53,36 +61,42 @@ def blinded_image(relative_path: str, content_hash: str) -> str:
 
 def stats_footer(person: Participant, pool=()):
     earned = earned_achievements(person.completed)
+    last_size = len(person.batch.comparisons) if person.batch else BATCH_SIZE
     badges = []
     for threshold, name, icon in earned:
-        fresh = person.phase == "milestone" and person.completed - BATCH_SIZE < threshold <= person.completed
-        title = f"{name} · {threshold} comparaisons" + (" · Nouveau" if fresh else "")
+        fresh = person.phase == "milestone" and person.completed - last_size < threshold <= person.completed
+        title = f'{name} · {threshold} {t("comparisons")}' + (f' · {t("new")}' if fresh else "")
         badges.append(f'<span class="achievement{" new" if fresh else ""}" title="{title}" role="img" aria-label="{title}">{icon}</span>')
     latest = earned[-1][1] if earned else ""
-    unlocked = any(person.completed - BATCH_SIZE < threshold <= person.completed for threshold, _, _ in earned)
-    rank = ("Nouveau : " if unlocked and person.phase == "milestone" else "") + latest
+    unlocked = any(person.completed - last_size < threshold <= person.completed for threshold, _, _ in earned)
+    rank = t("new_rank", name=latest) if unlocked and person.phase == "milestone" else latest
     upcoming = next_achievement(person.completed)
-    next_text = f"{upcoming[0] - person.completed} avant {upcoming[1]}" if upcoming else "Tous les succès débloqués"
+    next_text = t("next_achievement", remaining=upcoming[0] - person.completed, name=upcoming[1]) if upcoming else t("all_achievements")
     note = ""
     if pool and not ({p.reference.sha256 for p in pool} - {item.pair.reference.sha256 for item in person.history}):
-        note = '<p class="pool-note">Les images pourront revenir dans de nouveaux duels.</p>'
-    st.markdown(f'<footer class="stats-footer"><div class="totals"><span><strong>{person.completed}</strong> comparaisons</span>'
-                f'<span class="separator">·</span><span><strong>{person.completed // BATCH_SIZE}</strong> lots</span></div>'
+        note = f'<p class="pool-note">{t("pool_note")}</p>'
+    batches = person.completed_batches
+    st.markdown(f'<footer class="stats-footer"><div class="totals"><span><strong>{person.completed}</strong> {t("comparisons")}</span>'
+                f'<span class="separator">·</span><span><strong>{batches}</strong> {t("batch" if batches == 1 else "batches")}</span></div>'
                 f'<div class="earned">{"".join(badges)}<span>{rank}</span></div>'
                 f'<p class="next-achievement">{next_text}</p>{note}</footer>', unsafe_allow_html=True)
 
 
 def welcome(person, pool, ready, message=""):
     with st.container(key="welcome_actions"):
-        st.markdown('<div class="welcome-copy"><p class="eyebrow">Pixel Art Preference Study</p>'
-                    '<h1>Quel pixel art<br>préfères-tu ?</h1><p>Deux images. Ton choix. 10 fois.</p></div>', unsafe_allow_html=True)
-        if st.button("Commencer", type="primary", width="stretch", disabled=not ready, key="start"):
+        st.markdown(f'<div class="welcome-copy"><p class="eyebrow">{t("page_title")}</p>'
+                    f'<h1>{t("question")}</h1><p>{t("intro")}</p></div>', unsafe_allow_html=True)
+        if st.button(t("start"), type="primary", width="stretch", disabled=not ready, key="start"):
             person.start_batch(pool)
             st.rerun()
         if message:
             st.markdown(f'<p class="small-note">{html.escape(message)}</p>', unsafe_allow_html=True)
-    st.markdown('<footer class="welcome-footer">Anonyme · 2 à 4 minutes par lot<br>'
-                'Enregistré par lots de 10. Tu peux terminer après chaque lot.</footer>', unsafe_allow_html=True)
+    with st.container(key="welcome_bottom"):
+        st.markdown(f'<footer class="welcome-footer">{t("welcome_time")}<br>'
+                    f'{t("welcome_submission")}</footer>', unsafe_allow_html=True)
+        st.radio("Langue / Language", options=list(LANGUAGES),
+                 index=list(LANGUAGES).index(st.session_state.language), format_func=LANGUAGES.get,
+                 horizontal=True, label_visibility="collapsed", key="language_choice", on_change=change_language)
 
 
 @st.fragment
@@ -90,6 +104,7 @@ def evaluate(person: Participant, version: str):
     if person.phase != "evaluation":
         st.rerun()
     batch = person.batch
+    size = len(batch.comparisons)
     item = batch.comparisons[batch.index]
     previous = batch.answers.get(batch.index)
     animation = f"comparison_enter_{batch.index}"
@@ -98,24 +113,25 @@ def evaluate(person: Participant, version: str):
                 f'.st-key-evaluation_scene {{animation:{animation} 280ms ease both;}}</style>', unsafe_allow_html=True)
     with st.container(key="evaluation_screen"):
         answered = len(batch.answers)
-        st.markdown(f'<div class="evaluation-top"><span>Lot {batch.number}</span><span>{batch.index + 1} / 10</span></div>'
-                    f'<div class="batch-progress" role="progressbar" aria-label="Progression du lot {batch.number}" '
-                    f'aria-valuemin="0" aria-valuemax="10" aria-valuenow="{answered}">'
-                    f'<i style="width:{answered * 10}%"></i></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="evaluation-top"><span>{t("image_number", number=batch.index + 1, size=size)}</span>'
+                    f'<span class="batch-label">{t("batch_number", number=batch.number)}</span></div>'
+                    f'<div class="batch-progress" role="progressbar" aria-label="{t("batch_progress", number=batch.number)}" '
+                    f'aria-valuemin="0" aria-valuemax="{size}" aria-valuenow="{answered}">'
+                    f'<i style="width:{answered * 100 / size:.2f}%"></i></div>', unsafe_allow_html=True)
         with st.container(key="evaluation_scene"):
-            st.markdown('<h1 class="evaluation-question">Quel pixel art préfères-tu ?</h1>', unsafe_allow_html=True)
+            st.markdown(f'<h1 class="evaluation-question">{t("question")}</h1>', unsafe_allow_html=True)
             if item.left.prompt:
-                with st.popover("Voir le prompt", type="tertiary"):
+                with st.popover(t("view_prompt"), type="tertiary"):
                     st.write(item.left.prompt)
             try:
                 images = [blinded_image(asset.path, asset.sha256) for asset in (item.left, item.right)]
             except (OSError, ValueError):
-                st.markdown('<p class="small-note">Les images n’ont pas pu être chargées.</p>', unsafe_allow_html=True)
-                if st.button("Réessayer", width="stretch", key="reload_images"):
+                st.markdown(f'<p class="small-note">{t("image_error")}</p>', unsafe_allow_html=True)
+                if st.button(t("retry"), width="stretch", key="reload_images"):
                     st.rerun()
                 return
             cards = []
-            for label, side, image in zip(("Image de gauche", "Image de droite"), ("left", "right"), images):
+            for label, side, image in zip((t("left_image"), t("right_image")), ("left", "right"), images):
                 selected = previous and previous.side == side
                 cards.append(f'<figure class="image-card{" is-selected" if selected else ""}" data-side="{side}" '
                              'style="flex:1 1 0%;min-width:0;width:0;margin:0;aspect-ratio:1;box-sizing:border-box">'
@@ -124,19 +140,19 @@ def evaluate(person: Participant, version: str):
             # Keep the left/right geometry in the markup as well as the theme:
             # it must remain horizontal even before the stylesheet has loaded.
             st.markdown('<div class="pair-grid" style="display:flex;flex-direction:row;flex-wrap:nowrap;'
-                        'align-items:stretch;direction:ltr">' + ''.join(cards) + '</div>', unsafe_allow_html=True)
+                        'align-items:stretch;direction:ltr;gap:var(--gap,12px);'
+                        'padding-block:var(--question-space,56px) var(--comparison-space,20px)">'
+                        + ''.join(cards) + '</div>', unsafe_allow_html=True)
             # A native non-wrapping row keeps Gauche under the left image and
             # Droite under the right image, including narrow phone screens.
             with st.container(key="vote_controls", horizontal=True, wrap=False, gap="small"):
                 for label, side in CHOICES.items():
-                    st.button(label, width="stretch", key=f"vote_{side}_{batch.batch_id}_{batch.index}",
+                    st.button(t(side), width="stretch", key=f"vote_{side}_{batch.batch_id}_{batch.index}",
                               on_click=cast_vote, args=(person, side, batch.batch_id, batch.index, version))
         with st.container(key="evaluation_footer"):
-            back, total = st.columns(2)
-            back.button("← Retour", type="tertiary", disabled=batch.index == 0, key="back",
-                        on_click=previous_comparison, args=(person,))
-            total.markdown(f'<div class="total-quiet">{person.total_evaluated} au total</div>', unsafe_allow_html=True)
-    if batch.index + 1 < BATCH_SIZE:
+            st.button(t("back"), type="tertiary", disabled=batch.index == 0, key="back",
+                      on_click=previous_comparison, args=(person,))
+    if batch.index + 1 < size:
         upcoming = batch.comparisons[batch.index + 1]
         for asset in (upcoming.left, upcoming.right):
             try:
@@ -150,7 +166,7 @@ def cast_vote(person: Participant, side: str, batch_id: str, index: int, version
     if person.phase != "evaluation" or batch is None or batch.batch_id != batch_id or batch.index != index:
         return
     person.answer(side)
-    if index == BATCH_SIZE - 1:
+    if index == len(batch.comparisons) - 1:
         person.prepare_submission(version)
     else:
         batch.index += 1
@@ -165,71 +181,73 @@ def submit(person, store):
     with st.container(key="saving_actions"):
         status = st.empty()
         status.markdown('<div class="saving-copy" role="status"><span class="saving-dot"></span>'
-                        '<h1>Enregistrement…</h1></div>', unsafe_allow_html=True)
+                        f'<h1>{t("saving")}</h1></div>', unsafe_allow_html=True)
         try:
             receipt = store.save_batch(person.pending_submission)
             person.confirm_submission(receipt)
             st.rerun()
         except StorageError:
-            status.markdown('<div class="saving-copy"><h1>Connexion interrompue</h1></div>', unsafe_allow_html=True)
-            st.markdown('<p class="small-note">Tes 10 choix sont conservés dans cette session.</p>', unsafe_allow_html=True)
-            if st.button("Réessayer", type="primary", width="stretch", key="retry"):
+            status.markdown(f'<div class="saving-copy"><h1>{t("connection_error")}</h1></div>', unsafe_allow_html=True)
+            st.markdown(f'<p class="small-note">{t("votes_retained", size=len(person.batch.comparisons))}</p>', unsafe_allow_html=True)
+            if st.button(t("retry"), type="primary", width="stretch", key="retry"):
                 st.rerun()
 
 
-@st.fragment(run_every=0.2)
 def wait_for_milestone(person: Participant):
-    """Poll only the gate; the animated counter is outside this fragment."""
-    if person.phase != "milestone" or person.celebrated_batch == person.batch.batch_id:
-        st.rerun()  # Ignore a timer event queued by a screen that has been left.
-    if time.monotonic() >= person.celebration_ready_at:
-        person.celebrated_batch = person.batch.batch_id
-        person.celebration_ready_at = None
-        st.rerun()
+    """Release any timer left in an active session by the previous UI."""
+    person.celebration_ready_at = None
 
 
 def milestone_animation(person: Participant):
-    """No controls during the two-second counter animation; no server sleep."""
-    if person.celebration_ready_at is None:
-        person.celebration_ready_at = time.monotonic() + MILESTONE_SECONDS
-    st.markdown(f'<section class="celebration-screen" role="status" aria-live="polite" aria-busy="true">'
-                f'<p class="eyebrow">Lot {person.batch.number} terminé</p>'
-                f'<div class="counting-total" style="--count-from:{person.completed - BATCH_SIZE};'
-                f'--count-to:{person.completed}" aria-hidden="true"></div>'
-                f'<span class="sr-only">{person.completed} comparaisons enregistrées</span>'
-                '<p class="counter-label">comparaisons</p><div class="celebration-track"><i></i></div></section>', unsafe_allow_html=True)
+    """Celebrate each saved batch once, without delaying either action."""
     wait_for_milestone(person)
+    if person.celebrated_batch != person.batch.batch_id:
+        st.balloons()
+        person.celebrated_batch = person.batch.batch_id
 
 
 def milestone(person: Participant, pool):
-    if person.celebrated_batch != person.batch.batch_id:
-        milestone_animation(person)
-        return
+    milestone_animation(person)
     with st.container(key="milestone_actions"):
         st.markdown(f'<div class="milestone-copy"><span class="done-mark" aria-hidden="true">✓</span>'
-                    f'<h1>Lot {person.batch.number} terminé</h1></div>', unsafe_allow_html=True)
-        if st.button("En faire 10 autres", type="primary", width="stretch", key="continue"):
+                    f'<h1>{t("batch_completed", number=person.batch.number)}</h1></div>', unsafe_allow_html=True)
+        if st.button(t("continue"), type="primary", width="stretch", key="continue"):
             person.start_batch(pool)
             st.rerun()
-        if st.button("Terminer", type="tertiary", width="stretch", key="finish"):
+        if st.button(t("finish"), type="tertiary", width="stretch", key="finish"):
             person.finish()
             st.rerun()
     stats_footer(person, pool)
 
 
-def finished(person):
-    st.markdown('<section class="finished-screen"><span class="done-mark" aria-hidden="true">✓</span>'
-                '<h1>Merci !</h1><p>Ton regard fait avancer la recherche.</p></section>', unsafe_allow_html=True)
+def finished(person, pool):
+    with st.container(key="finished_actions"):
+        st.markdown('<section class="finished-screen"><span class="done-mark" aria-hidden="true">✓</span>'
+                    f'<h1>{t("thanks")}</h1><p class="final-score"><strong>{person.completed}</strong>'
+                    f'<span>{t("pixel_comparisons")}</span></p>'
+                    f'<p class="final-invitation">{t("share_invitation")}</p></section>', unsafe_allow_html=True)
+        render_score_share(person.completed, st.session_state.language)
+        if st.button(t("continue"), type="secondary", width="stretch", key="resume"):
+            person.start_batch(pool)
+            st.rerun()
     stats_footer(person)
 
 
 def main():
+    if st.session_state.get("language") not in LANGUAGES:
+        st.session_state.language = "fr"
     styles()
     preview = os.environ.get("PIXEL_STUDY_PREVIEW") == "1"
     brand(preview)
     if "person" not in st.session_state:
         st.session_state.person = Participant()
     person = st.session_state.person
+    if not isinstance(person, Participant):
+        # Hot reload can retain an instance of the previous module's class.
+        # Preserve its ID, votes and active batch while upgrading its methods.
+        person = Participant(**{key: value for key, value in vars(person).items()
+                                if key in Participant.__dataclass_fields__})
+        st.session_state.person = person
     # Keep an existing active session usable after this UI update.
     if not hasattr(person, "celebration_ready_at"):
         person.celebration_ready_at = None
@@ -240,7 +258,7 @@ def main():
             st.session_state.pool = pool
             st.session_state.dataset_version = version
         except (OSError, DatasetError, PoolTooSmall):
-            welcome(person, (), False, "L’étude est en préparation.")
+            welcome(person, (), False, t("study_preparing"))
             return
     if "store" not in st.session_state:
         if preview:
@@ -249,7 +267,7 @@ def main():
             try:
                 st.session_state.store = create_store(st.secrets)
             except (StreamlitSecretNotFoundError, KeyError, StorageError):
-                welcome(person, st.session_state.pool, False, "Les participations ouvriront bientôt.")
+                welcome(person, st.session_state.pool, False, t("study_closed"))
                 return
     pool = st.session_state.pool
     if person.phase == "welcome":
@@ -261,7 +279,7 @@ def main():
     elif person.phase == "milestone":
         milestone(person, pool)
     elif person.phase == "finished":
-        finished(person)
+        finished(person, pool)
 
 
 if __name__ == "__main__":

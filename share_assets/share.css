@@ -1,0 +1,49 @@
+:host { display:block; font-family:inherit; color:#242437; }
+* { box-sizing:border-box; }
+.score-share { display:flex; flex-direction:column; gap:10px; }
+.share-button { display:flex; align-items:center; justify-content:center; gap:10px;
+  width:100%; min-height:58px; padding:12px 18px; border:0; border-radius:18px;
+  background:#7454e8; color:white; font-family:inherit; font-size:1rem; font-weight:600; line-height:1.3;
+  cursor:pointer; touch-action:manipulation; transition:background 150ms ease,transform 150ms ease; }
+.share-button svg { width:21px; height:21px; flex-shrink:0; }
+.share-button:hover { background:#6847d9; }
+.share-button:active { transform:translateY(1px); }
+.share-button:focus-visible { outline:3px solid #b9a7ec; outline-offset:3px; }
+.share-button:disabled { opacity:.7; cursor:wait; }
+.messaging-options { display:flex; gap:10px; }
+.messaging-options a { flex:1 1 0; display:flex; justify-content:center; align-items:center;
+  min-height:44px; padding:8px 10px; border:1px solid #dfd8ec; border-radius:12px;
+  background:#fff; color:#6d5a87; font-size:.8rem; font-weight:600; text-decoration:none; }
+.messaging-options a:hover { background:#f4f0ff; }
+.messaging-options a:focus-visible,.copy-button:focus-visible,.close-button:focus-visible {
+  outline:3px solid #b9a7ec; outline-offset:2px; }
+.copy-button { align-self:center; min-height:30px; padding:2px 10px; border:0;
+  background:transparent; color:#867a94; font:inherit; font-size:.72rem; cursor:pointer; }
+.share-dialog { position:fixed; inset:0; width:calc(100% - 36px); max-width:420px;
+  max-height:calc(100dvh - 32px); margin:auto; padding:20px; border:1px solid #e5e1ee;
+  border-radius:20px; background:#fafafd; color:#242437; font-family:inherit; }
+.share-dialog::backdrop { background:#24243755; }
+.share-dialog:not([open]) { display:none; }
+.share-dialog[open] { display:block; }
+.preview-label { margin:0 0 12px; font-size:.95rem; font-weight:600; }
+.share-preview { display:block; width:100%; padding:12px 14px; margin:0;
+  border:1px solid #e5e1ee; border-radius:14px; background:#f5f3fa; color:#726780;
+  font:.75rem/1.55 sans-serif; font-family:inherit; resize:none; overflow:hidden;
+  white-space:pre-wrap; overflow-wrap:anywhere; }
+.share-preview:focus { outline:2px solid #c7b9ec; outline-offset:2px; }
+.manual-hint { font-size:.72rem; line-height:1.4; color:#746487; }
+.close-button { display:block; min-height:44px; width:100%; border:0; border-radius:12px;
+  background:#eeebf7; color:#615473; font:inherit; font-size:.85rem; cursor:pointer; }
+.share-status { margin:0; min-height:18px; color:#746487; text-align:center; font-size:.72rem; line-height:1.4; }
+@media(max-height:440px) {
+  .score-share { gap:6px; }
+  .share-button { min-height:44px; padding:8px 14px; border-radius:14px; font-size:.9rem; }
+  .messaging-options a { min-height:36px; padding:6px 10px; font-size:.75rem; }
+  .copy-button { min-height:26px; }
+  .share-dialog { padding:12px 16px; }
+  .share-preview { padding:7px 10px; font-size:.66rem; line-height:1.4; }
+  .share-status { font-size:.64rem; min-height:14px; }
+}
+@media(prefers-reduced-motion:reduce) {
+  * { transition:none !important; }
+}

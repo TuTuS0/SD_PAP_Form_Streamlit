@@ -1,8 +1,10 @@
 # Pixel Art Preference Study
 
 A Streamlit app for anonymous, blinded pixel-art comparisons, designed first for
-phones and also for desktop browsers. Participants submit **exactly 10 votes per
+phones and also for desktop browsers. Participants submit **exactly 15 votes per
 batch**, then freely choose another batch or Finish. There is no batch limit.
+Every batch follows **48 → 64 → 128**, repeated five times, with five comparisons
+at each resolution.
 Results can be stored directly as private **CSV files in Google Drive**, one file
 per completed batch. Supabase remains an optional alternative.
 
@@ -30,8 +32,8 @@ streamlit run app.py
 PIXEL_STUDY_PREVIEW=1 streamlit run app.py
 ```
 
-Preview mode displays a persistent banner and holds responses only in session
-memory. It never writes research votes. For live collection, unset this variable
+Preview mode holds responses only in session memory. It never writes research
+votes. For live collection, unset this variable
 and complete one storage setup below. Live mode never silently falls back to
 local files or preview storage.
 
@@ -89,7 +91,9 @@ convention, use `--confirm-filename-matches`. Optionally add
 the app's manifest with the reviewed file before launching a new study version.
 Missing competitor images are excluded rather than incorrectly matched.
 Duplicate keys, conflicting text, paths outside `images/`, and changed hashes
-fail validation. Fewer than 10 verified pairs prevents starting a partial batch.
+fail validation. A full batch requires five distinct reference images at each
+of 48, 64 and 128, with 15 distinct reference hashes across the batch. Insufficient
+coverage prevents starting a partial or incorrectly ordered batch.
 
 ## Persistent storage: Google Drive CSVs
 
@@ -108,7 +112,8 @@ web_app_url = "https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec"
 shared_secret = "YOUR_RANDOM_SECRET_OF_AT_LEAST_32_CHARACTERS"
 ```
 
-The receiver requires exactly 10 votes, checks their identifiers and winners,
+The receiver requires exactly 15 votes under the new sampler, checks resolution
+order, identifiers and winners,
 then creates one complete CSV while holding a script lock. It never appends to
 a global CSV. A retry compares the entire existing file against the same frozen
 submission and returns a matching receipt. A conflicting submission is rejected.
@@ -138,7 +143,7 @@ Supabase SDK, participant account, or spreadsheet-sharing setup is needed.
    replace both placeholders. This file is ignored by Git. Never put the secret
    in source, browser code, query strings, or the manifest.
 5. Disable preview mode, restart the app, and submit one test batch in a separate
-   test project. Confirm one `pixel_batches` row and 10 `pixel_votes` rows.
+   test project. Confirm one `pixel_batches` row and 15 `pixel_votes` rows.
 
 ```toml
 [supabase]
@@ -157,7 +162,7 @@ enabled, browser roles have no table permissions, and the RPC is executable only
 by `service_role`. The function uses `SECURITY INVOKER`. No public view exposes
 research results. See [database functions](https://supabase.com/docs/guides/database/functions).
 
-**One batch is one transaction.** The RPC validates exactly 10 ordered votes,
+**One batch is one transaction.** The RPC validates exactly 15 ordered votes,
 shared identifiers, sequential batches, valid winners, and repeat metadata. It
 inserts the batch header and all votes together or rolls back everything. A
 participant lock serializes simultaneous submissions. Reusing the same batch ID
@@ -170,22 +175,23 @@ batches stay saved. Local CSV files are never used for persistence.
 
 ## Sampling and reproducibility
 
-Each batch has its own random ID and seed. The seeded sampler selects 10 distinct
-pairs. **SDPAP images are drawn without replacement across the entire participant
-session**, including successive batches: all 300 distinct source images appear
-before any of them is reused. Image identity is based on content SHA-256, so
-identical files with different names do not circumvent this rule. Every batch
-also contains 10 distinct source images, including at cycle boundaries.
+Each batch has its own random ID and seed. The seeded sampler selects 15 distinct
+pairs in the exact order **48, 64, 128, 48, 64, 128, …**, five times. Both images
+in a comparison have the same target resolution. **SDPAP images are drawn without
+replacement across the entire participant session**, including successive batches:
+with the balanced repository, all 300 distinct source images appear before any
+is reused. Image identity is based on content SHA-256, so identical files with
+different names do not circumvent this rule. Every batch contains 15 distinct
+source images, including at cycle boundaries.
 
-The sampler first prioritizes the least-exposed reference images, then unseen
-competitor pairs for those images. It then balances competitors within/across
-batches, resolution within/across batches, prompt within/across batches, and
-finally the competitor/resolution stratum. Ties are broken randomly.
-Coverage accumulates across batches; sparse or exhausted strata use the best
-available balance. The full dataset supports method counts differing by at most
-one and resolution counts differing by at most one, both within each batch and
-cumulatively, in the tested sequences. Each tested full-pool batch uses all seven
-competitors, all three resolutions, and 10 distinct prompts.
+For the required resolution, the sampler prioritizes the least-exposed reference
+images, then unseen competitor pairs. It balances competitors and prompts within
+and across batches, then the competitor/resolution stratum. Ties are broken
+randomly. Resolution counts are exactly equal in every batch. The full dataset
+supports method counts differing by at most one within and across batches in the
+tested sequences; each tested batch uses all seven competitors and 15 distinct
+prompts. Feasibility checks also handle hashes shared between resolutions without
+stranding later slots.
 This is participant-level balancing, not a centrally allocated quota across all
 participants. Independent participants receive independent random seeds.
 
@@ -198,20 +204,22 @@ With the full, balanced repository, the first 300 comparisons use all 300 SDPAP
 images once. Subsequent source-image cycles use previously unseen competitors
 for each image, covering all 2,100 pairs before any exact pair repeats. After
 that, a new pair cycle can start. A batch crossing a source-image cycle boundary
-still contains 10 different source images. Fewer than 10 distinct source images
-prevents starting a batch, even if many competitor pairs exist.
+still contains 15 different source images. Insufficient distinct images at a
+required resolution prevents starting a batch, even if many other pairs exist.
 
-If a custom manifest has unequal competitor availability, a source image's
-competitor pool can exhaust earlier than other images' pools. In that case,
-the global source-image rule takes priority and the least-used eligible pairing
-is revisited. Any repeated pair has `is_repeat=true`, `pool_cycle>1` (its appearance
+If a custom manifest has unequal resolution coverage, a resolution's reference
+pool can exhaust before the other resolutions. Only that exhausted resolution
+reuses images in later batches; other strata continue without replacement.
+Unequal competitor availability can likewise exhaust a reference's eligible
+pairs earlier. Any repeated pair has `is_repeat=true`, `pool_cycle>1` (its appearance
 number), and `repeat_reason=pool_exhausted`, so an analyst can exclude it.
-The sampler version `balanced-reference-without-replacement-v2` records this
+The sampler version `balanced-reference-resolution-cycle-v3` records this
 protocol. The sampler imposes no participation cap.
 
 Each vote records the requested `participant_id`, `batch_id`, `batch_number`, and
 `comparison_number`. `comparison_number` is the participant's lifetime ordinal;
-`batch_comparison_number` runs from 1 to 10. Other fields include pair ID, original
+`batch_comparison_number` runs from 1 to 15. Batch submissions also record
+`batch_size=15`. Other fields include pair ID, original
 prompt ID/text, target resolution, left/right methods, image IDs/paths/hashes,
 selected side, winning method, UTC answer/submission timestamps, pool
 cycle, and repeat flag. Dataset digest, sampling seed, and sampler version are
@@ -225,6 +233,13 @@ and discard an unfinished batch. Already submitted batches stay in the selected
 persistent storage backend.
 No login, tracking cookie, email, name, or cross-device recovery is implemented.
 
+When upgrading an existing installation, redeploy the updated `google_drive/Code.gs`
+to the same Apps Script deployment, or rerun `schema.sql` for Supabase. Existing
+10-vote batches remain valid and are never rewritten. An already active 10-vote
+batch can finish with its original protocol; the next batch uses 15 and the new
+resolution cycle, retaining the participant ID and continuous comparison numbers.
+CSV merging accepts both protocols and checks numbering between adjacent batches.
+
 ## Participation milestones
 
 | Completed comparisons | Achievement |
@@ -235,43 +250,73 @@ No login, tracking cookie, email, name, or cross-device recovery is implemented.
 | 100 | Pixel Master |
 | 200 | Pixel Legend |
 
-The participant interface is in French and uses one viewport without page
-scrolling. A short question, two identical image frames, and **Gauche / Droite**
-are the main content. Batch progress stays at the top; Back and the accumulated
-total are discreetly placed at the bottom. Images resize to fit both the width
+The welcome screen has a **Français / English** selector at the bottom (French
+by default). The selected language persists throughout the session and applies
+to all interface copy, including milestones, statistics, and error/retry messages.
+Achievement names and original research prompts retain their original wording.
+The selector changes neither the participant ID nor votes or sampling.
+
+The participant interface uses one viewport without page scrolling.
+A short question, two identical image frames, and **Gauche / Droite**
+are the main content. The single-line question has no branding above it.
+**Image 4/15** and **Lot 3** sit above a contrasting progress bar; Back is discreetly
+placed at the bottom. Images stay side by side with a visible gap, and the two
+buttons align underneath them. The title has a generous gap above the images,
+with a smaller gap before the vote buttons. Images resize to fit both the width
 and available viewport height, including short landscape screens and phone safe
-areas. Duplicate instructions, source labels, large metric cards, and decorative
-celebrations have been removed. If original prompt text is available, it can be
+areas. Duplicate instructions, source labels, and large metric cards have been
+removed. If original prompt text is available, it can be
 opened on demand with **Voir le prompt**.
 
-After the storage backend confirms a complete batch, a counter increases from
-the previous total to the new total for **two seconds**. No voting, Continue,
-Finish, or Back control is rendered during that period. A timer fragment checks
-the gate without blocking the Python server; the animated counter lives outside
-that fragment and is not redrawn on each timer tick. Once finished, the timer
-is removed and the page shows a large **En faire 10 autres** button, followed by
-**Terminer**. The compact statistics, earned achievement icons, newly unlocked
-rank, and next achievement are at the bottom. The same batch never replays its
-animation on a normal rerun. Failed storage writes stay on Retry and never show
+After the storage backend confirms a complete batch, the page immediately shows
+a large **En faire 15 autres** button, followed by a smaller **Terminer** control.
+Streamlit balloons celebrate the saved batch without blocking either action.
+The compact statistics, earned achievement icons, newly unlocked rank, and next
+achievement are at the bottom. Balloons play once per batch, including across
+normal reruns. Failed storage writes stay on Retry and never show
 a successful milestone prematurely.
 
-CSS respects reduced motion: the same two-second gate remains, with static
-final values in place of animation. Rewards depend only on completed participation;
+CSS respects reduced motion by disabling transitions and hiding balloons.
+Rewards depend only on completed participation;
 the app never scores choices, speed, agreement, or other participants' preferences.
 **A tap records the choice and immediately advances; there is no confirmation
 step.** Every comparison requires a winner; no tie is offered or accepted by the
-participant state machine. The tenth tap submits the full batch automatically. Previous comparison
+participant state machine. The fifteenth tap submits the full batch automatically. Previous comparison
 allows a participant to revisit an earlier choice before that submission.
 
 Normal comparisons rerun only a Streamlit fragment, keeping the surrounding page
 stable. The next pair is warmed in the server image cache. Both images enter
-together with a short 280 ms fade/slide. Normal voting has no waiting timer;
-the two-second pause is used only after a successfully saved batch.
+together with a short 280 ms fade/slide. Neither voting nor milestones have an
+artificial waiting timer.
 Reduced-motion settings disable the animation. Buttons have tactile press/focus
 feedback, and delayed events belonging to the preceding pair are ignored.
 The database remains compatible with legacy tie votes already recorded by the
 previous protocol; this version never creates new ones.
 There are no rankings or streaks.
+
+After **Finish**, a large participation count and **Share my score** action
+appear with a ready-made invitation in the selected language. The action opens
+the device's native share sheet to choose a messaging app. Without that API, the
+main action opens the Messages/SMS composer. Direct **Messages / SMS** and
+**WhatsApp** links are also available with the score, invitation, and clean study
+link prefilled; the participant chooses the contact and confirms sending in the
+selected app. Native sharing and message-prefilling support vary by browser,
+device, and installed apps. Copying is a separate, discreet action. If clipboard
+permission is denied, a compact dialog provides selectable message text.
+Cancelling a share sheet does not trigger copying. Nothing is sent
+automatically, and sharing never affects votes, achievements, or saved results.
+Only the completed comparison count is shared, without participant identifiers,
+image choices, or methods. Each comparison is a pair of pixel arts.
+An **En faire 15 autres / Do 15 more** button on the final screen resumes the
+same participation with a new batch, preserving the anonymous ID, completed
+score, submitted batches, language, and image history. It keeps the 48/64/128
+sequence and the existing rules against repeated reference images.
+
+The share link uses the app's current URL without query parameters or fragments.
+Optionally set `PIXEL_STUDY_PUBLIC_URL=https://your-study.streamlit.app/` for a
+canonical public link, for example when testing behind a proxy or embedding the
+app. Clipboard access depends on the browser's capabilities and permissions;
+the manual-copy dialog is the fallback when copying is blocked.
 
 ## Export results
 
@@ -281,7 +326,7 @@ For Google Drive, download the batch CSVs into a local directory, then merge the
 python tools/merge_drive_csv.py --input ./downloaded-csvs --output results.csv
 ```
 
-This retains exactly 10 rows per unique batch, removes identical downloaded
+This retains exactly 15 rows per new batch (10 for legacy batches), removes identical downloaded
 copies, rejects conflicting submissions, preserves original values/text, and
 sorts results by participant and comparison number. It refuses to overwrite an
 existing output. The individual Drive files already are complete CSV exports.
@@ -326,10 +371,22 @@ python -m pytest -q
 ```
 
 Tests cover actual repository matching, seeded randomization, cumulative
-balancing, non-repetition, non-multiple-of-10 pool sizes, 250-comparison sessions,
+balancing, exact resolution cycles, non-repetition, non-multiple-of-15 pool sizes,
+375-comparison sessions and upgrades from legacy batches,
 achievement thresholds, malformed manifests, complete Streamlit flows, Back,
 Google Drive request signatures and receipts, CSV merging, and a lost storage
 acknowledgement followed by a safe retry.
+
+To test the client-side score sharing and clipboard fallbacks without posting
+anything (Node.js required, no installation needed):
+
+```bash
+node --test tests/test_score_share.mjs
+```
+
+This covers native sharing, cancellation, clipboard permissions, manual copying,
+and removal of private URL parameters. Check the final layout and native share
+sheet on real target devices before launching the study.
 
 To test the actual Apps Script source against isolated Google API mocks (Node.js
 required; no installation or Google account needed):
@@ -338,7 +395,7 @@ required; no installation or Google account needed):
 node tests/test_google_drive.mjs
 ```
 
-This checks 10-vote CSVs, Unicode/newline/quote preservation, signed requests,
+This checks 15-vote CSVs, resolution order, legacy batches, Unicode/newline/quote preservation, signed requests,
 script locking, conflicting retries, and a lost reply after file creation. The
 real Google authorization, deployment, permissions, and network connection must
 still be checked with a test folder using the setup guide.
@@ -352,6 +409,6 @@ node tests/test_database.mjs
 
 An optional final argument selects a Python interpreter. This test uses an
 in-memory PostgreSQL engine, the real SQL schema, and application-generated
-payloads. It checks rollback on the tenth vote, duplicate submissions, numbering,
+payloads. It checks rollback on the fifteenth vote, duplicate submissions, numbering,
 pool exhaustion, and denied reads/RPC calls for browser roles. It does not contact
 or modify a live Supabase project.

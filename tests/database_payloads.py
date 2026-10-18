@@ -6,17 +6,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from study import Participant, load_pool  # noqa: E402
+from study import RESOLUTION_ORDER, Participant, load_pool  # noqa: E402
 
 pool, version = load_pool(ROOT / "image_manifest.csv", ROOT)
-# Thirteen reference images exercise reference-cycle boundaries inside a batch.
-reference_hashes = list(dict.fromkeys(pair.reference.sha256 for pair in pool))[:13]
+# Seven references per resolution exercise cycle boundaries and exhaustion.
+reference_hashes = {digest for resolution in RESOLUTION_ORDER
+                    for digest in list(dict.fromkeys(pair.reference.sha256 for pair in pool
+                                                     if pair.reference.resolution == resolution))[:7]}
 pool = tuple(pair for pair in pool if pair.reference.sha256 in reference_hashes)
 person = Participant()
 payloads = []
-for _ in range(10):
+transition = "--legacy-transition" in sys.argv
+for number in range(2 if transition else 10):
     person.start_batch(pool)
-    for index in range(10):
+    if transition and number == 0:
+        person.batch.comparisons = person.batch.comparisons[:10]
+    for index in range(len(person.batch.comparisons)):
         person.batch.index = index
         person.answer(("left", "right")[index % 2])
     payload = person.prepare_submission(version)
