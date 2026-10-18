@@ -70,6 +70,8 @@ def stats_footer(person: Participant, pool=()):
     latest = earned[-1][1] if earned else ""
     unlocked = any(person.completed - last_size < threshold <= person.completed for threshold, _, _ in earned)
     rank = t("new_rank", name=latest) if unlocked and person.phase == "milestone" else latest
+    if person.phase == "finished":
+        rank = ""  # The current grade has its own prominent place beside the final score.
     upcoming = next_achievement(person.completed)
     next_text = t("next_achievement", remaining=upcoming[0] - person.completed, name=upcoming[1]) if upcoming else t("all_achievements")
     note = ""
@@ -221,9 +223,16 @@ def milestone(person: Participant, pool):
 
 
 def finished(person, pool):
+    earned = earned_achievements(person.completed)
+    rank = ""
+    if earned:
+        _, name, icon = earned[-1]
+        rank = (f'<div class="final-rank"><span class="final-rank-icon" aria-hidden="true">{icon}</span>'
+                f'<div><span class="final-rank-label">{t("earned_rank")}</span>'
+                f'<strong>{name}</strong></div></div>')
     with st.container(key="finished_actions"):
-        st.markdown('<section class="finished-screen"><span class="done-mark" aria-hidden="true">✓</span>'
-                    f'<h1>{t("thanks")}</h1><p class="final-score"><strong>{person.completed}</strong>'
+        st.markdown(f'<section class="finished-screen"><h1>{t("thanks")}</h1>{rank}'
+                    f'<p class="final-score"><strong>{person.completed}</strong>'
                     f'<span>{t("pixel_comparisons")}</span></p>'
                     f'<p class="final-invitation">{t("share_invitation")}</p></section>', unsafe_allow_html=True)
         render_score_share(person.completed, st.session_state.language)

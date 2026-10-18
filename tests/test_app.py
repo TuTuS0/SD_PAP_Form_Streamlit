@@ -359,6 +359,9 @@ def test_final_screen_can_resume_with_the_same_participant_and_vote_history(monk
     references = {item.pair.reference.sha256 for item in at.session_state.person.history}
     at.button(key="finish").click().run()
     assert at.button(key="resume").label == label
+    visible = " ".join(item.value for item in at.markdown)
+    assert ("Grade obtenu" if language == "fr" else "Achievement earned") in visible
+    assert "Pixel Explorer" in visible
     shared = json.loads(at.get("bidi_component")[0].proto.json)
     assert shared["messages_label"] == ("Envoyer par message" if language == "fr" else "Send a message")
     at.button(key="resume").click().run()
@@ -375,5 +378,7 @@ def test_final_screen_can_resume_with_the_same_participant_and_vote_history(monk
     assert at.session_state.person.completed == 30
     assert len(at.session_state.store.submissions) == 2
     at.button(key="finish").click().run()
+    visible = " ".join(item.value for item in at.markdown)
+    assert "Pixel Enthusiast" in visible
     shared = json.loads(at.get("bidi_component")[0].proto.json)
     assert "30" in shared["text"]
