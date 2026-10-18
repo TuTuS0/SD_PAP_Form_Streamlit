@@ -1,0 +1,10 @@
+.venv/
+.test-tools/
+__pycache__/
+.pytest_cache/
+.streamlit/secrets.toml
+.env
+.env.*
+!*.example
+results*.csv
+artifacts/
