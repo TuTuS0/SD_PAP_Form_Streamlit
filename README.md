@@ -157,7 +157,7 @@ continue to select Supabase automatically.
 
 The secret remains in Streamlit's Python process. Current secret keys are sent
 using `apikey`; legacy `service_role` JWTs are also supported for existing setups.
-Publishable/anon keys are deliberately insufficient. Both tables have RLS
+Publishable/anon keys are deliberately insufficient. All three tables have RLS
 enabled, browser roles have no table permissions, and the RPC is executable only
 by `service_role`. The function uses `SECURITY INVOKER`. No public view exposes
 research results. See [database functions](https://supabase.com/docs/guides/database/functions).
@@ -172,6 +172,37 @@ original frozen payload. The milestone appears only after confirmation.
 
 If saving fails, all current responses remain in the active session, and previous
 batches stay saved. Local CSV files are never used for persistence.
+
+### First-batch questionnaire and user table (Supabase)
+
+After the first batch has been saved, a short questionnaire asks whether the
+participant considers themselves artistic and knows what pixel art is. Both
+questions require an explicit Yes/No. Answering Yes to the second immediately
+reveals a third Yes/No question: whether they are sensitive to pixel art.
+Participants save these answers before continuing or finishing. The questionnaire
+never appears after later batches, including when resuming from the final screen.
+The same flow is available in local preview mode.
+
+Run the complete updated [schema.sql](schema.sql) in the SQL editor of the
+**same Supabase project as the app** before using this version. It preserves
+existing batches and votes, creates `public."user"`, and links batches to users
+through `participant_id`. The table has one row per anonymous participant:
+
+| Column | Meaning |
+| --- | --- |
+| `participant_id` | Same anonymous UUID as in `pixel_batches` and `pixel_votes` |
+| `is_artistic` | Considers themselves artistic: `true` / `false` |
+| `knows_pixel_art` | Knows what pixel art is: `true` / `false` |
+| `sensitive_to_pixel_art` | `true` / `false` if known; `NULL` otherwise |
+| `questionnaire_answered_at` | When the questionnaire was answered |
+| `created_at` | When the user row was created |
+
+Rows are created with the first saved batch. Earlier participants are backfilled
+with unanswered fields set to `NULL`; no answers are inferred. A separate private
+`submit_pixel_user` RPC validates and saves the questionnaire once. A lost reply
+can be retried with the frozen payload without changing the answers or resubmitting
+votes. User rows can be exported from the Supabase table editor and joined to votes
+by `participant_id`. Browser roles cannot read or write these rows.
 
 ## Sampling and reproducibility
 
@@ -268,7 +299,8 @@ areas. Duplicate instructions, source labels, and large metric cards have been
 removed. If original prompt text is available, it can be
 opened on demand with **Voir le prompt**.
 
-After the storage backend confirms a complete batch, the page immediately shows
+After the storage backend confirms a complete batch (and, on the first Supabase
+batch, after the questionnaire has been saved), the page immediately shows
 a large **En faire 15 autres** button, followed by a smaller **Terminer** control.
 Streamlit balloons celebrate the saved batch without blocking either action.
 The compact statistics, earned achievement icons, newly unlocked rank, and next

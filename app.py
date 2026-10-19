@@ -195,6 +195,46 @@ def submit(person, store):
                 st.rerun()
 
 
+def questionnaire(person: Participant):
+    # Native button groups keep keyboard selection and rerun as soon as an answer changes.
+    with st.container(key="questionnaire_actions"):
+        st.markdown(f'<div class="questionnaire-copy"><h1>{t("questionnaire_title")}</h1>'
+                    f'<p>{t("questionnaire_intro")}</p></div>', unsafe_allow_html=True)
+        labels = {True: t("yes"), False: t("no")}
+        artistic = st.pills(t("is_artistic"), options=[True, False], default=None, required=True,
+                            format_func=labels.get, width="stretch", key="profile_artistic")
+        knows = st.pills(t("knows_pixel_art"), options=[True, False], default=None, required=True,
+                         format_func=labels.get, width="stretch", key="profile_knows_pixel_art")
+        sensitive = None
+        if knows is True:
+            # A single inner block lets CSS unfold its actual height without a fixed limit.
+            with st.container(key="questionnaire_followup"):
+                with st.container(key="questionnaire_followup_content"):
+                    sensitive = st.pills(t("sensitive_to_pixel_art"), options=[True, False],
+                                         default=None, required=True, format_func=labels.get,
+                                         width="stretch", key="profile_sensitive_to_pixel_art")
+        complete = artistic is not None and knows is not None and (knows is False or sensitive is not None)
+        if st.button(t("save_questionnaire"), type="primary", width="stretch",
+                     disabled=not complete, key="save_questionnaire"):
+            person.prepare_user_submission(artistic, knows, sensitive)
+            st.rerun()
+
+
+def submit_user(person: Participant, store):
+    with st.container(key="saving_actions"):
+        status = st.empty()
+        status.markdown(f'<div class="saving-copy" role="status"><h1>{t("saving")}</h1></div>', unsafe_allow_html=True)
+        try:
+            receipt = store.save_user(person.pending_user_submission)
+            person.confirm_user_submission(receipt)
+            st.rerun()
+        except StorageError:
+            status.markdown(f'<div class="saving-copy"><h1>{t("connection_error")}</h1></div>', unsafe_allow_html=True)
+            st.markdown(f'<p class="small-note">{t("questionnaire_retained")}</p>', unsafe_allow_html=True)
+            if st.button(t("retry"), type="primary", width="stretch", key="retry_user"):
+                st.rerun()
+
+
 def wait_for_milestone(person: Participant):
     """Release any timer left in an active session by the previous UI."""
     person.celebration_ready_at = None
@@ -279,12 +319,21 @@ def main():
                 welcome(person, st.session_state.pool, False, t("study_closed"))
                 return
     pool = st.session_state.pool
+    # Supabase and local previews collect the profile once, after the first receipt.
+    # Older sessions already beyond their first batch keep their current flow.
+    if (person.phase == "milestone" and person.batch.number == 1
+            and person.user_answers is None and hasattr(st.session_state.store, "save_user")):
+        person.begin_questionnaire()
     if person.phase == "welcome":
         welcome(person, pool, True)
     elif person.phase == "evaluation":
         evaluate(person, st.session_state.dataset_version)
     elif person.phase == "submitting":
         submit(person, st.session_state.store)
+    elif person.phase == "questionnaire":
+        questionnaire(person)
+    elif person.phase == "submitting_user":
+        submit_user(person, st.session_state.store)
     elif person.phase == "milestone":
         milestone(person, pool)
     elif person.phase == "finished":

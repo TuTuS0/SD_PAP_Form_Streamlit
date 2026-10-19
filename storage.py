@@ -106,12 +106,25 @@ class SupabaseStore:
             raise StorageError("The database returned an unexpected submission receipt.")
         return receipt
 
+    def save_user(self, payload: dict) -> str:
+        try:
+            response = requests.post(self._url + "/rpc/submit_pixel_user", headers=self._headers,
+                                     json=payload, timeout=(5, 25), allow_redirects=False)
+            response.raise_for_status()
+            receipt = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise StorageError("The questionnaire could not be confirmed by the study database.") from exc
+        if receipt != payload["p_user"]["participant_id"]:
+            raise StorageError("The database returned an unexpected questionnaire receipt.")
+        return receipt
+
 
 class PreviewStore:
     """Explicit local preview only; never a fallback for failed live writes."""
 
     def __init__(self):
         self.submissions: dict[str, dict] = {}
+        self.users: dict[str, dict] = {}
 
     def save_batch(self, payload: dict) -> str:
         batch_id = payload["p_batch"]["batch_id"]
@@ -120,6 +133,14 @@ class PreviewStore:
             raise StorageError("This batch ID has already been used for another payload.")
         self.submissions[batch_id] = copy.deepcopy(payload)
         return batch_id
+
+    def save_user(self, payload: dict) -> str:
+        participant_id = payload["p_user"]["participant_id"]
+        previous = self.users.get(participant_id)
+        if previous is not None and previous != payload:
+            raise StorageError("This participant has already answered the questionnaire.")
+        self.users[participant_id] = copy.deepcopy(payload)
+        return participant_id
 
 
 def export_csv(url: str, secret_key: str) -> str:

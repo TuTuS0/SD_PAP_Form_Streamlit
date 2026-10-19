@@ -153,3 +153,35 @@ def test_storage_selection_is_explicit_and_legacy_compatible():
     assert isinstance(create_store({"supabase": {"url": "https://test.supabase.co", "secret_key": "sb_secret_test"}}), SupabaseStore)
     with pytest.raises(StorageError):
         create_store({"storage": {"backend": "google_drive"}, "supabase": {"url": "https://test.supabase.co", "secret_key": "sb_secret_test"}})
+
+
+def test_supabase_questionnaire_uses_private_rpc_and_checks_receipt(monkeypatch):
+    post = Mock(return_value=response("participant-id"))
+    monkeypatch.setattr(requests, "post", post)
+    store = SupabaseStore("https://study.supabase.co", "sb_secret_private")
+    payload = {"p_user": {"participant_id": "participant-id", "is_artistic": False,
+                           "knows_pixel_art": False, "sensitive_to_pixel_art": None}}
+    assert store.save_user(payload) == "participant-id"
+    assert post.call_args.args[0].endswith("/rpc/submit_pixel_user")
+    assert post.call_args.kwargs["json"] == payload
+    assert post.call_args.kwargs["headers"]["apikey"] == "sb_secret_private"
+    assert post.call_args.kwargs["allow_redirects"] is False
+    post.return_value = response("different-participant")
+    with pytest.raises(StorageError):
+        store.save_user(payload)
+    post.side_effect = requests.Timeout("private server details")
+    with pytest.raises(StorageError) as error:
+        store.save_user(payload)
+    assert "private server details" not in str(error.value)
+
+
+def test_preview_questionnaire_does_not_overwrite_answers_on_retry():
+    store = PreviewStore()
+    payload = {"p_user": {"participant_id": "id", "is_artistic": False}}
+    store.save_user(payload)
+    store.save_user(copy.deepcopy(payload))
+    assert len(store.users) == 1
+    payload["p_user"]["is_artistic"] = True
+    with pytest.raises(StorageError):
+        store.save_user(payload)
+    assert store.users["id"]["p_user"]["is_artistic"] is False

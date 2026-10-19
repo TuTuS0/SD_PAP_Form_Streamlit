@@ -27,12 +27,23 @@ def app(monkeypatch, language="fr"):
     return result
 
 
-def finish_batch(at, choice="Left image"):
+def answer_questionnaire(at, artistic=True, knows=False, sensitive=None):
+    at.pills(key="profile_artistic").set_value(artistic).run()
+    at.pills(key="profile_knows_pixel_art").set_value(knows).run()
+    if knows:
+        at.pills(key="profile_sensitive_to_pixel_art").set_value(sensitive).run()
+    at.button(key="save_questionnaire").click().run()
+    assert not at.exception
+
+
+def finish_batch(at, choice="Left image", questionnaire=True):
     for _ in range(BATCH_SIZE):
         assert not at.radio
         assert not any(button.key == "next" for button in at.button)
         vote_button(at, choice).click().run()
         assert not at.exception
+    if questionnaire and at.session_state.person.phase == "questionnaire":
+        answer_questionnaire(at)
     return at
 
 
@@ -132,6 +143,8 @@ def test_uncertain_save_retains_votes_and_retry_does_not_duplicate(monkeypatch, 
     batch_id = at.session_state.person.batch.batch_id
     at.button(key="retry").click().run()
     assert not at.exception
+    assert at.session_state.person.phase == "questionnaire"
+    answer_questionnaire(at)
     assert at.session_state.person.phase == "milestone"
     assert at.session_state.person.completed == BATCH_SIZE
     assert at.session_state.person.batch.batch_id == batch_id
@@ -341,6 +354,7 @@ def test_hot_reload_keeps_an_active_legacy_batch_then_starts_the_new_protocol(mo
         vote_button(at, "Left image").click().run()
         assert not at.exception
     assert at.session_state.person.completed == 10
+    answer_questionnaire(at)
     at.button(key="continue").click().run()
     batch = at.session_state.person.batch
     assert batch.number == 2 and len(batch.comparisons) == 15
@@ -382,3 +396,89 @@ def test_final_screen_can_resume_with_the_same_participant_and_vote_history(monk
     assert "Pixel Enthusiast" in visible
     shared = json.loads(at.get("bidi_component")[0].proto.json)
     assert "30" in shared["text"]
+
+
+@pytest.mark.parametrize("language,artistic,knows,sensitive", [
+    ("fr", True, False, None), ("en", False, True, False), ("fr", True, True, True),
+])
+def test_questionnaire_is_conditional_required_and_only_after_first_saved_batch(
+        monkeypatch, language, artistic, knows, sensitive):
+    at = app(monkeypatch, language)
+    assert not at.radio
+    finish_batch(at, questionnaire=False)
+    person = at.session_state.person
+    assert person.phase == "questionnaire" and person.completed == 15
+    assert person.completed_batches == 1 and person.total_evaluated == 15
+    assert len(at.session_state.store.submissions) == 1
+    assert not at.session_state.store.users
+    assert len(at.pills) == 2 and all(choice.value is None for choice in at.pills)
+    assert at.button(key="save_questionnaire").disabled
+    assert not any(button.key in {"continue", "finish"} for button in at.button)
+    assert at.pills(key="profile_artistic").label == (
+        "Te considères-tu comme une personne artistique ?" if language == "fr"
+        else "Do you consider yourself an artistic person?")
+    at.pills(key="profile_artistic").set_value(artistic).run()
+    at.pills(key="profile_knows_pixel_art").set_value(knows).run()
+    assert len(at.pills) == (3 if knows else 2)
+    assert at.button(key="save_questionnaire").disabled is knows
+    if knows:
+        at.pills(key="profile_sensitive_to_pixel_art").set_value(sensitive).run()
+    at.button(key="save_questionnaire").click().run()
+    assert not at.exception and person.phase == "milestone"
+    saved = at.session_state.store.users[person.participant_id]["p_user"]
+    assert saved["is_artistic"] is artistic
+    assert saved["knows_pixel_art"] is knows
+    assert saved["sensitive_to_pixel_art"] is sensitive
+    at.run()
+    assert not at.radio and len(at.session_state.store.users) == 1
+    at.button(key="continue").click().run()
+    finish_batch(at, questionnaire=False)
+    assert person.phase == "milestone" and not at.radio
+    at.button(key="finish").click().run()
+    at.button(key="resume").click().run()
+    assert person.participant_id == saved["participant_id"]
+    assert len(at.session_state.store.users) == 1
+
+
+def test_hiding_pixel_art_question_discards_its_previous_answer(monkeypatch):
+    at = app(monkeypatch)
+    finish_batch(at, questionnaire=False)
+    at.pills(key="profile_artistic").set_value(False).run()
+    at.pills(key="profile_knows_pixel_art").set_value(True).run()
+    at.pills(key="profile_sensitive_to_pixel_art").set_value(True).run()
+    at.pills(key="profile_knows_pixel_art").set_value(False).run()
+    assert len(at.pills) == 2
+    at.button(key="save_questionnaire").click().run()
+    assert not at.exception
+    assert at.session_state.person.user_answers["sensitive_to_pixel_art"] is None
+
+
+@pytest.mark.parametrize("language", ["fr", "en"])
+def test_questionnaire_retry_keeps_votes_and_saves_user_once(monkeypatch, language):
+    class UncertainUserStore(PreviewStore):
+        failed = False
+
+        def save_user(self, payload):
+            receipt = super().save_user(payload)
+            if not self.failed:
+                self.failed = True
+                raise StorageError("Response lost after questionnaire commit")
+            return receipt
+
+    at = app(monkeypatch, language)
+    at.session_state.store = UncertainUserStore()
+    finish_batch(at, questionnaire=False)
+    answer_questionnaire(at, artistic=False, knows=True, sensitive=False)
+    person = at.session_state.person
+    pending = json.dumps(person.pending_user_submission, sort_keys=True)
+    assert person.phase == "submitting_user" and person.user_answers is None
+    assert person.completed == 15 and person.completed_batches == 1
+    assert len(at.session_state.store.submissions) == len(at.session_state.store.users) == 1
+    assert not at.get("balloons")
+    assert not any(button.key in {"continue", "finish"} for button in at.button)
+    at.button(key="retry_user").click().run()
+    assert not at.exception and person.phase == "milestone"
+    assert json.dumps(person.pending_user_submission, sort_keys=True) == pending
+    assert person.user_answers["is_artistic"] is False
+    assert person.user_answers["sensitive_to_pixel_art"] is False
+    assert len(at.session_state.store.submissions) == len(at.session_state.store.users) == 1

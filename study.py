@@ -254,6 +254,8 @@ class Participant:
     pending_submission: dict | None = None
     celebrated_batch: str | None = None
     celebration_ready_at: float | None = None
+    user_answers: dict | None = None
+    pending_user_submission: dict | None = None
 
     @property
     def total_evaluated(self) -> int:
@@ -264,7 +266,7 @@ class Participant:
     def completed_batches(self) -> int:
         if self.batch is None:
             return 0
-        return self.batch.number if self.phase in {"milestone", "finished"} else self.batch.number - 1
+        return self.batch.number if self.phase in {"milestone", "finished", "questionnaire", "submitting_user"} else self.batch.number - 1
 
     def start_batch(self, pool: tuple[Pair, ...]) -> None:
         if self.phase not in {"welcome", "milestone", "finished"}:
@@ -323,12 +325,47 @@ class Participant:
     def confirm_submission(self, batch_id: str) -> None:
         if self.batch is None or self.batch.batch_id != batch_id:
             raise ValueError("Submission receipt does not match this batch.")
-        if self.phase == "milestone":
+        if self.phase in {"milestone", "questionnaire", "submitting_user", "finished"}:
             return  # A repeated acknowledgement must not add participation twice.
         if self.phase != "submitting":
             raise ValueError("This batch is not awaiting a receipt.")
         self.history.extend(self.batch.comparisons)
         self.completed += len(self.batch.comparisons)
+        self.phase = "milestone"
+
+    def begin_questionnaire(self) -> None:
+        if self.phase != "milestone" or self.batch is None or self.batch.number != 1 or self.user_answers is not None:
+            raise ValueError("The questionnaire is only available after the first saved batch.")
+        self.phase = "questionnaire"
+
+    def prepare_user_submission(self, is_artistic: bool, knows_pixel_art: bool,
+                                sensitive_to_pixel_art: bool | None) -> dict:
+        if self.phase == "submitting_user" and self.pending_user_submission is not None:
+            return self.pending_user_submission
+        if self.phase != "questionnaire":
+            raise ValueError("There is no questionnaire to submit.")
+        if type(is_artistic) is not bool or type(knows_pixel_art) is not bool:
+            raise ValueError("Both questions require an explicit yes or no.")
+        if knows_pixel_art and type(sensitive_to_pixel_art) is not bool:
+            raise ValueError("Pixel-art sensitivity requires an explicit yes or no.")
+        self.pending_user_submission = {"p_user": {
+            "participant_id": self.participant_id,
+            "is_artistic": is_artistic,
+            "knows_pixel_art": knows_pixel_art,
+            "sensitive_to_pixel_art": sensitive_to_pixel_art if knows_pixel_art else None,
+            "questionnaire_answered_at": datetime.now(timezone.utc).isoformat(),
+        }}
+        self.phase = "submitting_user"
+        return self.pending_user_submission
+
+    def confirm_user_submission(self, participant_id: str) -> None:
+        if participant_id != self.participant_id or self.pending_user_submission is None:
+            raise ValueError("Questionnaire receipt does not match this participant.")
+        if self.phase == "milestone" and self.user_answers is not None:
+            return
+        if self.phase != "submitting_user":
+            raise ValueError("The questionnaire is not awaiting a receipt.")
+        self.user_answers = dict(self.pending_user_submission["p_user"])
         self.phase = "milestone"
 
     def finish(self) -> None:

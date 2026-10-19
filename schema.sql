@@ -2,6 +2,25 @@
 -- Streamlit calls the RPC with a server-only secret key (service_role).
 begin;
 
+-- One anonymous user per participant. Answers stay NULL until the questionnaire
+-- following their first saved batch has been completed.
+create table if not exists public."user" (
+    participant_id uuid primary key,
+    is_artistic boolean,
+    knows_pixel_art boolean,
+    sensitive_to_pixel_art boolean,
+    questionnaire_answered_at timestamptz,
+    created_at timestamptz not null default now(),
+    constraint user_questionnaire_complete check (
+        (is_artistic is null and knows_pixel_art is null
+            and sensitive_to_pixel_art is null and questionnaire_answered_at is null)
+        or (is_artistic is not null and knows_pixel_art is not null
+            and questionnaire_answered_at is not null
+            and ((knows_pixel_art and sensitive_to_pixel_art is not null)
+                or (not knows_pixel_art and sensitive_to_pixel_art is null)))
+    )
+);
+
 create table if not exists public.pixel_batches (
     batch_id uuid primary key,
     participant_id uuid not null,
@@ -14,6 +33,20 @@ create table if not exists public.pixel_batches (
     unique (participant_id, batch_number),
     unique (batch_id, participant_id, batch_number)
 );
+
+-- Upgrade existing studies without inventing answers for earlier participants.
+insert into public."user" (participant_id)
+    select distinct participant_id from public.pixel_batches
+    on conflict (participant_id) do nothing;
+do $$
+begin
+    if not exists (select 1 from pg_constraint
+        where conrelid = 'public.pixel_batches'::regclass and conname = 'pixel_batches_user_fkey') then
+        alter table public.pixel_batches add constraint pixel_batches_user_fkey
+            foreign key (participant_id) references public."user" (participant_id);
+    end if;
+end;
+$$;
 
 create table if not exists public.pixel_votes (
     participant_id uuid not null,
@@ -70,9 +103,14 @@ create index if not exists pixel_votes_participant_pair_idx
 
 alter table public.pixel_batches enable row level security;
 alter table public.pixel_votes enable row level security;
+alter table public."user" enable row level security;
 revoke all on public.pixel_batches, public.pixel_votes from public, anon, authenticated;
+revoke all on public."user" from public, anon, authenticated;
 -- No participant can read the research tables through a browser API.
 grant select, insert on public.pixel_batches, public.pixel_votes to service_role;
+grant select, insert on public."user" to service_role;
+grant update (is_artistic, knows_pixel_art, sensitive_to_pixel_art, questionnaire_answered_at)
+    on public."user" to service_role;
 
 create or replace function public.submit_pixel_batch(p_batch jsonb, p_votes jsonb)
 returns uuid
@@ -121,6 +159,9 @@ begin
     end if;
     select coalesce(max(comparison_number), 0) into v_offset
         from public.pixel_votes where participant_id = v_participant_id;
+
+    insert into public."user" (participant_id) values (v_participant_id)
+        on conflict (participant_id) do nothing;
 
     insert into public.pixel_batches
         (batch_id, participant_id, batch_number, dataset_version, sampler_version, sampling_seed, submission)
@@ -174,5 +215,58 @@ $$;
 
 revoke all on function public.submit_pixel_batch(jsonb, jsonb) from public, anon, authenticated;
 grant execute on function public.submit_pixel_batch(jsonb, jsonb) to service_role;
+
+create or replace function public.submit_pixel_user(p_user jsonb)
+returns uuid
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    v_participant_id uuid := (p_user->>'participant_id')::uuid;
+    v_answered_at timestamptz := (p_user->>'questionnaire_answered_at')::timestamptz;
+    v_existing public."user"%rowtype;
+begin
+    if jsonb_typeof(p_user) is distinct from 'object'
+       or v_participant_id is null or v_answered_at is null
+       or jsonb_typeof(p_user->'is_artistic') is distinct from 'boolean'
+       or jsonb_typeof(p_user->'knows_pixel_art') is distinct from 'boolean' then
+        raise exception 'The questionnaire requires valid identifiers, a timestamp and boolean answers';
+    end if;
+    if ((p_user->>'knows_pixel_art')::boolean
+            and jsonb_typeof(p_user->'sensitive_to_pixel_art') is distinct from 'boolean')
+       or (not (p_user->>'knows_pixel_art')::boolean
+            and p_user->'sensitive_to_pixel_art' is distinct from 'null'::jsonb) then
+        raise exception 'Pixel-art sensitivity is required only when pixel art is known';
+    end if;
+
+    perform pg_advisory_xact_lock(hashtextextended(v_participant_id::text, 0));
+    if not exists (select 1 from public.pixel_batches
+        where participant_id = v_participant_id and batch_number = 1) then
+        raise exception 'Save the first batch before answering the questionnaire';
+    end if;
+    select * into strict v_existing from public."user"
+        where participant_id = v_participant_id for update;
+    if v_existing.questionnaire_answered_at is not null then
+        if v_existing.is_artistic is not distinct from (p_user->>'is_artistic')::boolean
+           and v_existing.knows_pixel_art is not distinct from (p_user->>'knows_pixel_art')::boolean
+           and v_existing.sensitive_to_pixel_art is not distinct from (p_user->>'sensitive_to_pixel_art')::boolean
+           and v_existing.questionnaire_answered_at = v_answered_at then
+            return v_participant_id;
+        end if;
+        raise exception 'This participant has already answered the questionnaire';
+    end if;
+    update public."user" set
+        is_artistic = (p_user->>'is_artistic')::boolean,
+        knows_pixel_art = (p_user->>'knows_pixel_art')::boolean,
+        sensitive_to_pixel_art = (p_user->>'sensitive_to_pixel_art')::boolean,
+        questionnaire_answered_at = v_answered_at
+    where participant_id = v_participant_id;
+    return v_participant_id;
+end;
+$$;
+
+revoke all on function public.submit_pixel_user(jsonb) from public, anon, authenticated;
+grant execute on function public.submit_pixel_user(jsonb) to service_role;
 notify pgrst, 'reload schema';
 commit;

@@ -223,6 +223,38 @@ def test_every_vote_requires_a_winner():
     assert all(vote["winner"] == vote["left_method"] for vote in payload["p_votes"])
 
 
+def test_first_batch_questionnaire_preserves_counts_and_freezes_retries():
+    person = Participant()
+    with pytest.raises(ValueError):
+        person.begin_questionnaire()
+    complete(person, synthetic_pool())
+    person.begin_questionnaire()
+    assert person.phase == "questionnaire"
+    assert person.completed == person.total_evaluated == BATCH_SIZE and person.completed_batches == 1
+    with pytest.raises(ValueError):
+        person.start_batch(synthetic_pool())
+    with pytest.raises(ValueError):
+        person.finish()
+    for answers in [(None, False, None), (False, None, None), (True, True, None), (1, False, None)]:
+        with pytest.raises(ValueError):
+            person.prepare_user_submission(*answers)
+    pending = person.prepare_user_submission(False, False, True)
+    assert pending["p_user"]["sensitive_to_pixel_art"] is None
+    assert person.prepare_user_submission(True, True, True) is pending
+    person.confirm_submission(person.batch.batch_id)  # Duplicate batch receipt during the questionnaire.
+    assert person.completed == BATCH_SIZE
+    with pytest.raises(ValueError):
+        person.confirm_user_submission("wrong-id")
+    person.confirm_user_submission(person.participant_id)
+    person.confirm_user_submission(person.participant_id)
+    assert person.phase == "milestone" and person.user_answers == pending["p_user"]
+    with pytest.raises(ValueError):
+        person.begin_questionnaire()
+    complete(person, synthetic_pool())
+    with pytest.raises(ValueError):
+        person.begin_questionnaire()
+
+
 @pytest.mark.parametrize("action", ["continue", "finish"])
 def test_saved_batch_actions_are_immediate_even_with_a_legacy_animation_deadline(action):
     person = Participant()
